@@ -1706,5 +1706,104 @@ ok(err({ enabled = false }):find("PREFERENCE_NOT_APPLIED", 1, true) ~= nil,
 _G.reaper.SNM_SetIntConfigVar = saved_set
 end)()
 
+-- set_fx_param_automation_state: the ACT/VIS/ARM flags on an FX parameter
+-- envelope. Both REAPER APIs that would be the obvious way to do this are
+-- unusable on this build (no SetEnvelopeInfo_Value; GetEnvelopeInfo_Value
+-- reads B_ACTIVE back as 0 for FX param envelopes no matter the real state),
+-- so the command goes through the state chunk and these tests pin that.
+;(function()
+local set_state = auto.set_state_command
+
+-- Chunk parsing is the load-bearing half: a flag read wrong means an envelope
+-- reported active when it plays nothing.
+local flags = auto.chunk_flags(
+  "<PARMENV 8:675084177 0.000000 1.000000 0.500000\nACT 1 -1\nVIS 0 1 1\nARM 0\nPT 0 1 0\n>")
+eq(flags.ACT, true, "ACT 1 parses as active")
+eq(flags.VIS, false, "VIS 0 parses as hidden")
+eq(flags.ARM, false, "ARM 0 parses as unarmed")
+
+-- A flag name inside another token must not be mistaken for the flag line.
+local decoy = auto.chunk_flags("<PARMENV 1\nDEFSHAPE 0 -1 -1\nPT 0 1 0\n>")
+eq(decoy.ACT, false, "an absent ACT line reads as inactive, not nil")
+
+local chunk, chunk_writes, chunk_rejected = nil, 0, false
+local fake_env = { exists = true }
+local function bind_chunk_fakes()
+  _G.reaper.GetTrack = function(_, index) return index == 0 and "env-track" or nil end
+  _G.reaper.CountTracks = function() return 1 end
+  _G.reaper.GetTrackGUID = function() return "{ENV}" end
+  _G.reaper.GetTrackName = function() return true, "Guitar L" end
+  _G.reaper.TrackFX_GetFXGUID = function() return "{ENV-FX}" end
+  _G.reaper.TrackFX_GetCount = function() return 1 end
+  _G.reaper.TrackFX_GetFXName = function() return true, "VST3: Archetype Misha Mansoor X" end
+  _G.reaper.TrackFX_GetNumParams = function() return 20 end
+  _G.reaper.TrackFX_GetParamName = function() return true, "Laser Mix" end
+  _G.reaper.GetFXEnvelope = function(_, _, _, create)
+    ok(create == false, "set_state must never create an envelope by observing it")
+    return fake_env
+  end
+  _G.reaper.GetEnvelopeStateChunk = function() return true, chunk end
+  _G.reaper.SetEnvelopeStateChunk = function(_, text)
+    if chunk_rejected then return false end
+    chunk_writes = chunk_writes + 1
+    chunk = text
+    return true
+  end
+end
+bind_chunk_fakes()
+
+local function payload(extra)
+  local p = { target_track_name = "Guitar L", fx_name_contains = "Misha", param_index = 8 }
+  for k, v in pairs(extra or {}) do p[k] = v end
+  return { payload = p }
+end
+
+-- Turning an inactive lane on, preserving every trailing field REAPER wrote.
+chunk = "<PARMENV 8 0 1 0.5\nACT 0 -1\nVIS 0 1 1\nARM 0\nPT 0 1 0\n>"
+local res = set_state(payload({ active = true, visible = true }))
+eq(res.before.active, false, "before reports the chunk's real state, not B_ACTIVE")
+eq(res.after.active, true, "after reports the lane switched on")
+eq(res.after.visible, true, "after reports the lane made visible")
+ok(chunk:find("\nACT 1 -1\n", 1, true) ~= nil, "ACT keeps its trailing shape field")
+ok(chunk:find("\nVIS 1 1 1\n", 1, true) ~= nil, "VIS keeps its trailing lane fields")
+ok(chunk:find("\nARM 0\n", 1, true) ~= nil, "ARM is untouched when not requested")
+ok(chunk:find("PT 0 1 0", 1, true) ~= nil, "the envelope's points survive the rewrite")
+
+-- Omitted flags hold their current value rather than defaulting to off.
+chunk = "<PARMENV 8\nACT 1 -1\nVIS 1 1 1\nARM 1\n>"
+local held = set_state(payload({ visible = false }))
+eq(held.after.active, true, "an omitted flag holds its current value")
+eq(held.after.armed, true, "an omitted arm flag holds too")
+eq(held.after.visible, false, "the requested flag still moves")
+
+-- report_only is the only way to read the true flags without writing.
+chunk = "<PARMENV 8\nACT 1 -1\nVIS 0 1 1\nARM 0\n>"
+local before_writes = chunk_writes
+local report = set_state(payload({ report_only = true, active = false }))
+eq(report.report_only, true, "report_only is flagged in the response")
+eq(report.state.active, true, "report_only returns the real state")
+eq(chunk_writes, before_writes, "report_only writes nothing")
+
+-- A missing flag line is added rather than silently skipped.
+chunk = "<PARMENV 8\nPT 0 1 0\n>"
+local added = set_state(payload({ armed = true }))
+eq(added.after.armed, true, "a missing ARM line is created")
+eq(added.lines_rewritten.ARM, 0, "the response reports ARM was added, not rewritten")
+
+-- A rejected chunk write must raise, never report success.
+chunk = "<PARMENV 8\nACT 0 -1\n>"
+chunk_rejected = true
+local caught = select(2, pcall(set_state, payload({ active = true })))
+ok(tostring(caught):find("ENVELOPE_CHUNK_REJECTED", 1, true) ~= nil,
+   "a refused chunk write raises instead of reporting success")
+chunk_rejected = false
+
+-- An envelope that does not exist is a clear error, not an accidental create.
+_G.reaper.GetFXEnvelope = function() return nil end
+local missing = select(2, pcall(set_state, payload({ active = true })))
+ok(tostring(missing):find("NO_ENVELOPE", 1, true) ~= nil,
+   "a parameter with no envelope reports NO_ENVELOPE")
+end)()
+
 rmrf(sandbox)
 print(("test_bridge: OK (%d checks)"):format(checks))

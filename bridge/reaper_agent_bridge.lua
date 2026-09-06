@@ -2307,6 +2307,118 @@ function automation.envelope_state(envelope)
   }
 end
 
+-- Points are stored whether or not the lane is switched on: an envelope left
+-- at ACT 0 plays nothing, which reads exactly like a write that silently
+-- failed. Two API gaps shape this command. There is no SetEnvelopeInfo_Value
+-- on this build (see automation.restore), AND GetEnvelopeInfo_Value reads
+-- B_ACTIVE/B_VISIBLE back as 0 for FX parameter envelopes regardless of the
+-- real state. So the state chunk is the only trustworthy source and sink for
+-- these flags, and this command both reads and verifies through it.
+-- On the automation table, not a local: the bridge main chunk is at Lua's
+-- 200-local limit (same reason the automation helpers are grouped there).
+automation.FLAG_LINES = { "ACT", "VIS", "ARM" }
+
+function automation.chunk_flags(text)
+  -- Anchored to a line start so a flag name occurring inside another token
+  -- cannot match. %f[%S] is the frontier between the leading newline's
+  -- whitespace and the keyword.
+  return {
+    ACT = text:match("%f[%S]ACT%s+(%d)") == "1",
+    VIS = text:match("%f[%S]VIS%s+(%d)") == "1",
+    ARM = text:match("%f[%S]ARM%s+(%d)") == "1",
+  }
+end
+
+function automation.set_state_command(command)
+  local payload = command.payload or {}
+  local track, track_index, api_index, fx_name, fx_scope, display_fx_index = find_fx(payload)
+  local param_index, param_info = find_fx_param(track, api_index, payload)
+  local envelope = reaper.GetFXEnvelope(track, api_index, param_index, false)
+  if not envelope then
+    error("NO_ENVELOPE: no FX envelope on that parameter; write automation points first")
+  end
+  local ok, chunk = reaper.GetEnvelopeStateChunk(envelope, "", false)
+  if not ok or type(chunk) ~= "string" or chunk == "" then
+    error("ENVELOPE_CHUNK_UNAVAILABLE: could not read the envelope state chunk")
+  end
+
+  local before_flags = automation.chunk_flags(chunk)
+  local before = automation.envelope_state(envelope)
+  before.active, before.visible, before.armed =
+    before_flags.ACT, before_flags.VIS, before_flags.ARM
+
+  local function requested(key, current)
+    if payload[key] == nil then return current end
+    return payload[key] == true
+  end
+  local target = {
+    ACT = requested("active", before_flags.ACT),
+    VIS = requested("visible", before_flags.VIS),
+    ARM = requested("armed", before_flags.ARM),
+  }
+
+  -- report_only exists because every read path above is chunk-based: without
+  -- it, inspecting the true flags would mean issuing a write.
+  if payload.report_only == true then
+    return {
+      track = { index = track_index, name = select(2, reaper.GetTrackName(track, "")),
+        guid = reaper.GetTrackGUID(track) },
+      fx = { index = display_fx_index or api_index, scope = fx_scope or "track", name = fx_name },
+      parameter = { index = param_index, name = param_info and param_info.name },
+      report_only = true, state = before,
+    }
+  end
+
+  -- ACT <on> <shape>, VIS <on> <lane> <inline>, ARM <on>. Only the leading
+  -- flag moves; every trailing field REAPER wrote is preserved verbatim.
+  local rewritten = {}
+  for _, name in ipairs(automation.FLAG_LINES) do
+    local on = target[name] and "1" or "0"
+    local updated, count = chunk:gsub("%f[%S]" .. name .. "([^\r\n]*)", function(rest)
+      local tail = rest:match("^%s+[%-%d]+(.*)$") or ""
+      return name .. " " .. on .. tail
+    end, 1)
+    if count > 0 then
+      chunk = updated
+    else
+      -- REAPER omits defaulted flags; add the line just after the header.
+      chunk = chunk:gsub("(\n)", "%1" .. name .. " " .. on .. "\n", 1)
+    end
+    rewritten[name] = count
+  end
+
+  if not reaper.SetEnvelopeStateChunk(envelope, chunk, false) then
+    error("ENVELOPE_CHUNK_REJECTED: REAPER refused the rewritten envelope state chunk")
+  end
+
+  local ok_after, chunk_after = reaper.GetEnvelopeStateChunk(envelope, "", false)
+  if not ok_after then
+    error("ENVELOPE_CHUNK_UNAVAILABLE: could not reread the envelope state chunk")
+  end
+  local after_flags = automation.chunk_flags(chunk_after)
+  for _, name in ipairs(automation.FLAG_LINES) do
+    if after_flags[name] ~= target[name] then
+      error("ENVELOPE_STATE_UNCONFIRMED: " .. name .. " reads "
+        .. tostring(after_flags[name]) .. " after asking for " .. tostring(target[name]))
+    end
+  end
+
+  local after = automation.envelope_state(envelope)
+  after.active, after.visible, after.armed =
+    after_flags.ACT, after_flags.VIS, after_flags.ARM
+
+  reaper.TrackList_AdjustWindows(false)
+  reaper.UpdateArrange()
+
+  return {
+    track = { index = track_index, name = select(2, reaper.GetTrackName(track, "")),
+      guid = reaper.GetTrackGUID(track) },
+    fx = { index = display_fx_index or api_index, scope = fx_scope or "track", name = fx_name },
+    parameter = { index = param_index, name = param_info and param_info.name },
+    before = before, after = after, lines_rewritten = rewritten,
+  }
+end
+
 function automation.read_command(command)
   local payload = command.payload or {}
   local track, track_index, api_index, fx_name, fx_scope, display_fx_index = find_fx(payload)
@@ -4583,6 +4695,7 @@ handlers.move_fx = command_move_fx
 handlers.set_fx_param = command_set_fx_param
 handlers.write_fx_param_automation = automation.write_command
 handlers.get_fx_param_automation = automation.read_command
+handlers.set_fx_param_automation_state = automation.set_state_command
 handlers.apply_automation_transaction = automation.transaction_command
 
 -- Markers / regions / items

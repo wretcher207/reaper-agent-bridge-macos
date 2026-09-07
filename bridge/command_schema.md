@@ -970,3 +970,52 @@ fresh instance.
   ] }
 ```
 The whole batch is one undo block.
+
+
+### get_mix_snapshot
+Read-only, no audio files or undo point. CLI: `python reaperd.py cmd get_mix_snapshot '{}'`.
+MCP: `get_mix_snapshot` with the same payload fields. Raw example:
+
+```json
+{"version":3,"type":"get_mix_snapshot","payload":{"offset":0,"limit":16,"max_params":0}}
+```
+
+Optional `target_track_guid` (preferred) or `target_track_name` selects one track;
+otherwise page through project tracks with the master last. `offset` defaults to
+0, `limit` to 16 (clamped 1–64), `max_params` to 0 (clamped 0–64 per FX).
+Returns `project_name`, `project_state_change_count`, `transport`, `time_selection`,
+`tracks`, `paging: {offset,limit,total,has_more}`, `elapsed_ms`, and `meter_note`.
+Each track includes GUID/name, selected/mute/solo, pan mode/law, folder depth,
+envelope count when available, FX identities/enabled/offline state and optional
+parameter values, plus `routing` from `get_track_routing`.
+`meters` is optional native instantaneous left/right linear peak data with
+`sample_over` (current sample >= unity), `integrated:false`. It is NOT a latched
+clip indicator, true peak, RMS, LUFS, correlation, or a silence verdict.
+Paginated reads are separate observations; restart if project state changes
+between pages. FX parameter lists expose `parameters_truncated`.
+
+`get_track_routing` now also returns `hardware_outputs`, zero-based route `index`,
+and source/destination track GUIDs for receives/sends where the peer exists.
+Hardware routes have names/channel maps, not track GUIDs.
+
+### batch: detailed partial results
+
+```json
+{"version":3,"type":"batch","payload":{"stop_on_error":true,"return_partial_results":true,"commands":[{"type":"get_mix_snapshot","payload":{"limit":16}},{"type":"get_capture_preflight","payload":{}}]}}
+```
+
+At most 128 operations. Malformed command objects and nested batches are rejected
+before execution. Legacy `stop_on_error:true` errors still produce `ok:false`.
+With `return_partial_results:true`, a subcommand failure returns an outer successful
+response carrying `data.all_ok:false`, `results[]`, `failed_index` (1-based),
+`completed` (attempted operations), `total`, `stopped`, and `rolled_back:false`.
+Always check `all_ok` AND each result's `ok`. `stop_on_error:false` attempts every
+operation and also exposes these fields. No automatic rollback. Mutating batches
+use one undo block; all-read batches create none. Commands that write files or
+preferences retain their existing gates and are not made undoable by batching.
+Use `snapshot_track_state` or existing verified preview for explicit recovery.
+Place a final snapshot in a batch to read back state after successful writes.
+
+Replies additionally expose `timing.setup_ms`, `timing.execute_ms`, and
+`timing.defer_gap_ms` when available. These are bridge-side durations, not
+end-to-end latency; serialization/publication and client wait are excluded.

@@ -1,6 +1,7 @@
 {
   "bridge_root": "",
   "poll_interval_seconds": 0.25,
+  "adaptive_poll": true,
   "allow_risk_level_3": false,
   "allow_audio_writes": false,
   "allow_project_save": false,

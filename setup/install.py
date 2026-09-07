@@ -213,7 +213,7 @@ def set_gates(repo_root, updates, dry_run=False):
         # The bridge re-derives bridge_root from its own location on load, so
         # this value is a starting point, not a binding one.
         config = {"bridge_root": os.path.abspath(repo_root),
-                  "poll_interval_seconds": 0.25}
+                  "poll_interval_seconds": 0.25, "adaptive_poll": True}
     for key, value in updates.items():
         config[key] = bool(value)
     written = ", ".join(f"{k}={str(bool(v)).lower()}" for k, v in updates.items())

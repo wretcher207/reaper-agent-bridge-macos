@@ -379,7 +379,10 @@ local reload_requested = false
 local active_preview = nil
 local preview_recovered_at = nil
 local last_poll = 0
-local poll_interval = tonumber(config.poll_interval_seconds or 0.25)
+local poll_interval = math.max(0, tonumber(config.poll_interval_seconds) or 0.25)
+-- Legacy interval remains the idle ceiling; recent traffic scans every defer.
+config._hot_until = 0
+config._next_poll_interval = 0
 local heartbeat_interval = 5
 local last_heartbeat = nil
 local last_in_flight = nil
@@ -440,6 +443,8 @@ local function move_file(src, dst)
 end
 
 local function list_json_files(dir)
+  -- REAPER caches directory listings; polling index 0 alone can miss new commands.
+  reaper.EnumerateFiles(dir, -1)
   local files = {}
   local index = 0
   while true do
@@ -4307,10 +4312,13 @@ local function command_get_track_routing(command)
       if category < 0 then
         _, other_name = reaper.GetTrackReceiveName(track, i)
       else
-        _, other_name = reaper.GetTrackSendName(track, hw_output_count + i)
+        _, other_name = reaper.GetTrackSendName(track, (category == 1 and 0 or hw_output_count) + i)
       end
       local function v(key) return reaper.GetTrackSendInfo_Value(track, category, i, key) end
+      local peer = category ~= 1 and v(category < 0 and "P_SRCTRACK" or "P_DESTTRACK") or nil
       entries[#entries + 1] = {
+        index = i,
+        [category < 0 and "source_track_guid" or "target_track_guid"] = peer and peer ~= 0 and reaper.GetTrackGUID(peer) or nil,
         [category < 0 and "source_track_name" or "target_track_name"] = other_name,
         volume_db = db_from_volume(v("D_VOL")),
         pan = v("D_PAN"),
@@ -4345,6 +4353,7 @@ local function command_get_track_routing(command)
     track = { index = track_index, name = track_name, guid = reaper.GetTrackGUID(track) },
     sends = send_entries(0),
     receives = send_entries(-1),
+    hardware_outputs = send_entries(1),
     parent_track = parent_info,
     volume_db = db_from_volume(reaper.GetMediaTrackInfo_Value(track, "D_VOL")),
     pan = reaper.GetMediaTrackInfo_Value(track, "D_PAN"),
@@ -4365,6 +4374,7 @@ local function scan_track_fx(track, include_values, max_params)
   for_each_fx(track, function(fx, api_index, scope, fx_name)
     local entry = fx_summary(track, api_index, fx, scope, fx_name, {
       enabled = reaper.TrackFX_GetEnabled(track, api_index),
+      offline = reaper.TrackFX_GetOffline and reaper.TrackFX_GetOffline(track, api_index) or false,
       parameter_count = reaper.TrackFX_GetNumParams(track, api_index),
     })
     entry.parameters = {}
@@ -4418,6 +4428,50 @@ local function command_scan_fx(command)
     include_values = include_values,
     tracks = tracks,
   }
+end
+
+local function command_get_mix_snapshot(command)
+  local p = command.payload or {}
+  local limit = math.floor(math.max(1, math.min(64, tonumber(p.limit) or 16)))
+  local offset = math.floor(math.max(0, tonumber(p.offset) or 0))
+  local max_params = math.floor(math.max(0, math.min(64, tonumber(p.max_params) or 0)))
+  local started = reaper.time_precise()
+  local total = reaper.CountTracks(0) + 1
+  local rows = {}
+  local target = nil
+  if p.target_track_guid or p.target_track_name then target = find_track(p) end
+  local function collect(track)
+    local row = track_summary(track)
+    row.routing = command_get_track_routing({ payload = { target_track_guid = row.guid } })
+    row.fx = scan_track_fx(track, true, max_params)
+    row.selected = reaper.IsTrackSelected(track)
+    row.muted = reaper.GetMediaTrackInfo_Value(track, "B_MUTE") == 1
+    row.solo = reaper.GetMediaTrackInfo_Value(track, "I_SOLO")
+    row.pan_mode = reaper.GetMediaTrackInfo_Value(track, "I_PANMODE")
+    row.pan_law = reaper.GetMediaTrackInfo_Value(track, "D_PANLAW")
+    row.folder_depth = reaper.GetMediaTrackInfo_Value(track, "I_FOLDERDEPTH")
+    row.envelope_count = reaper.CountTrackEnvelopes and reaper.CountTrackEnvelopes(track) or nil
+    if reaper.Track_GetPeakInfo then
+      local l = finite_or_nil(reaper.Track_GetPeakInfo(track, 0))
+      local r = finite_or_nil(reaper.Track_GetPeakInfo(track, 1))
+      row.meters = { left_peak = l, right_peak = r,
+        sample_over = (l and l >= 1 or false) or (r and r >= 1 or false),
+        scope = "instantaneous_native_peak", integrated = false }
+    end
+    rows[#rows + 1] = row
+  end
+  if target then collect(target) else
+    for i = offset, math.min(total - 1, offset + limit - 1) do
+      collect(i == total - 1 and reaper.GetMasterTrack(0) or reaper.GetTrack(0, i))
+    end
+  end
+  return { project_name = get_project_name(), transport = get_transport(),
+    time_selection = get_time_selection(), tracks = rows,
+    project_state_change_count = reaper.GetProjectStateChangeCount and reaper.GetProjectStateChangeCount(0) or nil,
+    paging = { offset = offset, limit = limit, total = target and 1 or total,
+               has_more = not target and offset + #rows < total },
+    elapsed_ms = (reaper.time_precise() - started) * 1000,
+    meter_note = "Peak samples only; no RMS, LUFS, true peak, silence or phase verdict. Use time-scoped measure for audio evidence." }
 end
 
 -- Enumerate plugins INSTALLED in REAPER (not just FX already on tracks).
@@ -4518,7 +4572,7 @@ local handlers = {}
 -- Commands that don't need an undo block: they read state, not project state.
 -- Everything else mutates the project and gets wrapped. Named for what it IS.
 local NO_UNDO_BLOCK = {
-  get_context = true, get_fx_parameters = true, scan_fx = true,
+  get_mix_snapshot = true, get_context = true, get_fx_parameters = true, scan_fx = true,
   get_fx_param_automation = true,
   discover_drum_map = true,
   get_track_routing = true,
@@ -4615,19 +4669,40 @@ end
 local function command_batch(command)
   local payload = command.payload or {}
   local commands = payload.commands or {}
+  if type(commands) ~= "table" or #commands > 128 then
+    error("BAD_BATCH: commands must be an array of at most 128 operations")
+  end
+  for k, sub in pairs(commands) do
+    if type(k) ~= "number" or k < 1 or k > #commands or k % 1 ~= 0
+       or type(sub) ~= "table" or type(sub.type) ~= "string" then
+      error("BAD_BATCH: every operation must be a command object")
+    end
+    if sub.type == "batch" then error("BAD_BATCH: nested batches are not supported") end
+  end
   local results = {}
-  reaper.Undo_BeginBlock()
+  local failed_index = nil
+  local writes = false
+  for _, sub in ipairs(commands) do if is_mutating(sub.type) then writes = true end end
+  if writes then reaper.Undo_BeginBlock() end
   for i, sub in ipairs(commands) do
     local ok, data = pcall(run_command, sub, true)
     results[#results + 1] = batch_result(i, sub.type, ok, data)
+    if not ok and not failed_index then failed_index = i end
     if not ok and payload.stop_on_error ~= false then
-      reaper.Undo_EndBlock(command.undo_label or payload.undo_label or "Agent: batch failed", -1)
+      if writes then reaper.Undo_EndBlock(command.undo_label or payload.undo_label or "Agent: batch failed", -1) end
+      if payload.return_partial_results == true then
+        return { results = results, all_ok = false, failed_index = i,
+                 completed = #results, total = #commands, stopped = true,
+                 rolled_back = false }
+      end
       local inner = error_code_from(data, "BATCH_FAILED")
       error(inner .. ": batch sub-command " .. i .. " failed: " .. tostring(data))
     end
   end
-  reaper.Undo_EndBlock(command.undo_label or payload.undo_label or "Agent: batch", -1)
-  return { results = results }
+  if writes then reaper.Undo_EndBlock(command.undo_label or payload.undo_label or "Agent: batch", -1) end
+  return { results = results, all_ok = failed_index == nil,
+           failed_index = failed_index, completed = #results, total = #commands,
+           stopped = false, rolled_back = false }
 end
 
 -- Read / context
@@ -4635,6 +4710,7 @@ end
 -- P3-002 command replaced the old minimal {name, guid} reply (kept as
 -- top-level compat fields) and returns selected=false instead of erroring
 -- when nothing is selected.
+handlers.get_mix_snapshot = command_get_mix_snapshot
 handlers.get_context = command_get_context
 handlers.get_fx_parameters = command_get_fx_parameters
 handlers.scan_fx = command_scan_fx
@@ -5153,6 +5229,7 @@ local function write_result(command, ok, data_or_error)
       error = { code = error_code_from(data_or_error, "COMMAND_FAILED"), details = tostring(data_or_error) },
     }
   end
+  result.timing = command._timing
   atomic_write_json(join(paths.outbox, command.id .. ".json"), result)
 end
 
@@ -5181,6 +5258,7 @@ local function maybe_heartbeat(force)
 end
 
 local function process_file(filename)
+  local process_started = reaper.time_precise()
   local inbox_path = join(paths.inbox, filename)
   local processing_path = join(paths.processing, filename)
   if not move_file(inbox_path, processing_path) then return end
@@ -5195,6 +5273,12 @@ local function process_file(filename)
     return
   end
 
+  if type(command) ~= "table" then
+    command = { id = filename:gsub("%.json$", ""), type = "parse" }
+    write_result(command, false, "BAD_COMMAND: JSON command must be an object")
+    move_file(processing_path, join(paths.failed, filename))
+    return
+  end
   command.id = safe_id(command.id, filename:gsub("%.json$", ""))
   if auth_token and command.token ~= auth_token then
     write_result(command, false, "AUTH_FAILED: missing or wrong token")
@@ -5204,7 +5288,11 @@ local function process_file(filename)
   in_flight_command = command.id
   maybe_heartbeat()  -- publish the marker BEFORE the (possibly long) command runs
   log_line("start " .. command.id .. " " .. tostring(command.type))
+  local execute_started = reaper.time_precise()
   local run_ok, data = pcall(run_command, command, false)
+  command._timing = { setup_ms = (execute_started - process_started) * 1000,
+    execute_ms = (reaper.time_precise() - execute_started) * 1000,
+    defer_gap_ms = config._defer_gap_ms }
   -- write_result -> json.encode can throw (a value json can't encode); if it does,
   -- still emit a failure reply so the command never strands with no outbox.
   local wrote_ok, werr = pcall(write_result, command, run_ok, data)
@@ -5277,7 +5365,7 @@ local LOCK_CONFIRM_DELAY = 0.75
 -- Per-tick wall-clock budget for draining the inbox (M3). Checked AFTER each
 -- command — never splits one — so a burst of heavy commands can't freeze the UI
 -- thread; the remainder waits for the next tick. 50 stays as a hard backstop.
-local DRAIN_BUDGET = 0.03
+-- Cooperative budget: a single synchronous command cannot be preempted.
 
 -- The reload handover. Runs only from the bottom of the defer loop, after the
 -- reload command's reply is in outbox/ and its file archived. The lock is
@@ -5309,6 +5397,8 @@ end
 
 local function loop()
   local current = reaper.time_precise()
+  config._defer_gap_ms = config._last_tick and (current - config._last_tick) * 1000 or nil
+  config._last_tick = current
 
   if not lock_confirmed and current - lock_claim_t >= LOCK_CONFIRM_DELAY then
     local held = read_lock()
@@ -5319,19 +5409,24 @@ local function loop()
     lock_confirmed = true
   end
 
-  if current - last_poll >= poll_interval then
+  if current - last_poll >= config._next_poll_interval then
     last_poll = current
     local ok, err = pcall(function()
       maybe_heartbeat(false)
       local files = list_json_files(paths.inbox)
       local tick_start = reaper.time_precise()
-      for i = 1, math.min(#files, 50) do
+      if #files > 0 then config._hot_until = current + 2 end
+      config._next_poll_interval = config.adaptive_poll == false and poll_interval
+        or (current < config._hot_until and 0 or math.min(poll_interval, 0.05))
+      local playing = reaper.GetPlayState() ~= 0
+      local budget = playing and 0.003 or 0.008
+      for i = 1, math.min(#files, playing and 1 or 50) do
         process_file(files[i])
         maybe_heartbeat(false)  -- keep heartbeat/lock fresh mid-drain (self-throttles)
         -- Hand over before touching another command: anything still in inbox/
         -- belongs to the fresh instance.
         if reload_requested then break end
-        if reaper.time_precise() - tick_start >= DRAIN_BUDGET then break end
+        if reaper.time_precise() - tick_start >= budget then break end
       end
       maybe_sweep()
       maybe_expire_preview(os.time())
@@ -5401,6 +5496,7 @@ if _G.REAPER_BRIDGE_SELFTEST then
     find_fx = find_fx,
     set_fx_param_result = set_fx_param_result,
     batch_result = batch_result,
+    list_json_files = list_json_files,
     capture_provenance = capture_provenance,
     folder_descendants = folder_descendants,
     snapshot_validate = snapshot_validate,

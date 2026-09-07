@@ -689,3 +689,20 @@ def test_status_still_says_rerun_once_nothing_holds_the_lock(
     out = capsys.readouterr().out
     assert "Revive: re-run the bridge action" in out
     assert "WAIT" not in out
+
+
+def test_reply_wait_starts_fast_then_backs_off(root, monkeypatch):
+    clock = [0.0]
+    delays = []
+    from types import SimpleNamespace
+    def sleep(delay):
+        delays.append(delay)
+        clock[0] += delay
+    monkeypatch.setattr(reaperd, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], sleep=sleep))
+    with pytest.raises(TimeoutError):
+        reaperd.send_command({"type": "get_context"}, wait=True,
+                             timeout_ms=1100, bridge_root=root)
+    assert delays[0] == 0.005
+    assert delays[-1] == 0.025
+    assert not list(__import__('pathlib').Path(root, 'inbox').glob('*.json'))

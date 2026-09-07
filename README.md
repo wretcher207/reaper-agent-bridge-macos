@@ -588,3 +588,9 @@ file. Keeping the folder local is still the actual protection.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+
+For dense agent mix work, start with `get_mix_snapshot` and batch inexpensive
+writes plus readback. See [interaction review and agent workflow](docs/INTERACTION_REVIEW.md)
+for measured latency, limits, recovery and follow-ups. Runnable read examples:
+`commands/examples/get_mix_snapshot.json` and `commands/examples/inspect_mix_batch.json`.

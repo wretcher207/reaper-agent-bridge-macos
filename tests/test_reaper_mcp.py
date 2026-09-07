@@ -1484,3 +1484,17 @@ def test_stdio_framing_end_to_end(root):
     # stdout carried only valid JSON-RPC (the log line went to stderr).
     assert "[reaper-mcp]" not in out
     assert "[reaper-mcp]" in err
+
+
+def test_snapshot_forwarding_and_partial_batch(monkeypatch):
+    seen = []
+    def forward(kind, args, keys, **kwargs):
+        seen.append((kind, args, keys, kwargs))
+        return {"content": [{"type": "text", "text": "{}"}]}
+    monkeypatch.setattr(reaper_mcp, "_forward", forward)
+    call("get_mix_snapshot", {"target_track_guid": "{track}", "limit": 4, "max_params": 8})
+    assert seen[-1][0] == "get_mix_snapshot"
+    assert seen[-1][3]["track"] is True
+    assert "max_params" in seen[-1][2]
+    call("batch", {"commands": [], "return_partial_results": True})
+    assert "return_partial_results" in seen[-1][2]

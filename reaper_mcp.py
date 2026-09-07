@@ -421,7 +421,7 @@ def tool_delete_items_in_range(args):
 
 
 def tool_batch(args):
-    return _forward("batch", args, ("commands", "undo_label"),
+    return _forward("batch", args, ("commands", "undo_label", "return_partial_results"),
                     timeout_ms=60000, dry_run=True,
                     extra={"stop_on_error": args.get("stop_on_error", True)})
 
@@ -1466,6 +1466,18 @@ TOOLS = [
         "handler": tool_delete_items_in_range,
     },
     {
+        "name": "get_mix_snapshot",
+        "description": "Read a bounded page of tracks, master, GUIDs, routing, FX, optional parameter values and instantaneous peak meters in one hop. Use measure for integrated audio evidence.",
+        "inputSchema": _schema({
+            "target_track_guid": {"type": "string"},
+            "target_track_name": {"type": "string"},
+            "offset": {"type": "integer", "minimum": 0},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 64},
+            "max_params": {"type": "integer", "minimum": 0, "maximum": 64},
+        }),
+        "handler": lambda args: _forward("get_mix_snapshot", args, ("offset", "limit", "max_params"), track=True),
+    },
+    {
         "name": "batch",
         "description": ("Run several bridge commands as ONE undo block and one "
                         "round-trip. commands: [{type, payload}]. Use for "
@@ -1475,6 +1487,7 @@ TOOLS = [
             **DRY_RUN_PROP,
             "commands": {"type": "array", "items": {"type": "object"},
                          "description": "[{\"type\": \"add_track\", \"payload\": {...}}, ...]"},
+            "return_partial_results": {"type": "boolean", "description": "Keep operation results on failure. Check data.all_ok; no rollback."},
             "stop_on_error": {"type": "boolean", "description": "Default true."},
             "undo_label": {"type": "string"},
         }, required=["commands"]),

@@ -265,7 +265,8 @@ def send_command(cmd, wait=False, timeout_ms=30000, bridge_root=None, verbose=Fa
     if not wait:
         return cid, None
 
-    deadline = time.monotonic() + timeout_ms / 1000.0
+    started_wait = time.monotonic()
+    deadline = started_wait + timeout_ms / 1000.0
     while time.monotonic() < deadline:
         if os.path.isfile(outbox):
             # A transient Windows lock (OneDrive sync, antivirus scan) can
@@ -277,7 +278,7 @@ def send_command(cmd, wait=False, timeout_ms=30000, bridge_root=None, verbose=Fa
                 with open(outbox, "r", encoding="utf-8") as f:
                     reply = f.read()
             except OSError:
-                time.sleep(0.05)
+                time.sleep(0.005 if time.monotonic() - started_wait < 1 else 0.025)
                 continue
             # The reader owns its reply: the bridge no longer count-sweeps
             # outbox/ (it was deleting unread replies on big batches), so delete
@@ -287,7 +288,7 @@ def send_command(cmd, wait=False, timeout_ms=30000, bridge_root=None, verbose=Fa
             except OSError:
                 pass
             return cid, reply
-        time.sleep(0.05)
+        time.sleep(0.005 if time.monotonic() - started_wait < 1 else 0.025)
     # Withdraw the command so a TIMEOUT report stays true: a file left in
     # inbox/ (or requeued from processing/ at bridge startup) would still
     # execute later against whatever project is open then. If the bridge

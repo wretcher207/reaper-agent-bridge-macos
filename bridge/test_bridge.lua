@@ -1805,5 +1805,54 @@ ok(tostring(missing):find("NO_ENVELOPE", 1, true) ~= nil,
    "a parameter with no envelope reports NO_ENVELOPE")
 end)()
 
+-- Dense batches: prevalidation, partial results, continued errors, balanced undo.
+;(function()
+  local begins, ends, calls = 0, 0, 0
+  reaper.Undo_BeginBlock = function() begins = begins + 1 end
+  reaper.Undo_EndBlock = function() ends = ends + 1 end
+  B.handlers.test_move = function() calls = calls + 1; return { value = calls } end
+  B.handlers.test_fail = function() error("TEST_FAILURE: deliberate") end
+  local commands = {{type="test_move"}, {type="test_fail"}, {type="test_move"}}
+  local r = B.handlers.batch({payload={commands=commands, return_partial_results=true}})
+  eq(r.all_ok, false, "partial batch reports failure")
+  eq(r.completed, 2, "stopped batch preserves attempted results")
+  eq(r.results[1].data.value, 1, "partial batch retains successful write")
+  eq(r.results[2].ok, false, "partial batch retains failing operation")
+  eq(calls, 1, "stop prevents following write")
+  eq(begins, ends, "stopped batch closes undo")
+  r = B.handlers.batch({payload={commands=commands, stop_on_error=false}})
+  eq(r.completed, 3, "continue attempts following operations")
+  eq(r.all_ok, false, "continue never claims all operations passed")
+  eq(begins, ends, "continued batch closes undo")
+  local success, err = pcall(B.handlers.batch, {payload={commands=commands}})
+  eq(success, false, "legacy stop still raises")
+  ok(tostring(err):find("TEST_FAILURE",1,true), "legacy error retains code")
+  eq(begins, ends, "legacy failure closes undo")
+  local before = calls
+  success = pcall(B.handlers.batch, {payload={commands={{type="test_move"}, false}}})
+  eq(success, false, "malformed batch rejected before any writes")
+  eq(calls, before, "malformed batch makes no partial edit")
+  success = pcall(B.handlers.batch, {payload={commands={{type="batch"}}}})
+  eq(success, false, "nested undo batches rejected")
+  B.handlers.test_move, B.handlers.test_fail = nil, nil
+end)()
+
+-- Model a stale native directory cache: newly queued work must be visible.
+;(function()
+  local refreshed = false
+  local original = reaper.EnumerateFiles
+  reaper.EnumerateFiles = function(_, index)
+    if index == -1 then refreshed = true; return nil end
+    if refreshed and index == 0 then return "new.json" end
+    if refreshed and index == 1 then return "unfinished.json.tmp" end
+    return nil
+  end
+  local files = B.list_json_files("inbox")
+  eq(refreshed, true, "queue scan invalidates REAPER directory cache")
+  eq(#files, 1, "queue scan ignores incomplete atomic writes")
+  eq(files[1], "new.json", "queue scan sees newly published command")
+  reaper.EnumerateFiles = original
+end)()
+
 rmrf(sandbox)
 print(("test_bridge: OK (%d checks)"):format(checks))

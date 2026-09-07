@@ -1,0 +1,9 @@
+{
+  "version": 3,
+  "type": "get_mix_snapshot",
+  "payload": {
+    "offset": 0,
+    "limit": 16,
+    "max_params": 0
+  }
+}

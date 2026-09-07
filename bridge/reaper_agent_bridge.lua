@@ -1,9 +1,14 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.18.0
+-- @version 3.19.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
 --   json.lua
+--   ../skills/arrangement-midi/SKILL.md
+--   ../skills/arrangement-midi/references/midi-plan.md
+--   ../skills/arrangement-midi/scripts/midi_plan.py
+--   ../skills/drum-humanize/SKILL.md
+--   ../skills/drum-humanize/references/planning.md
 -- @about
 --   Reaper Daemon lets an AI coding agent control REAPER through a local file
 --   bridge: the agent drops JSON command files in inbox/, this background
@@ -13,6 +18,9 @@
 --   root (where inbox/ and outbox/ are created on first run) is the folder one
 --   level up from this script. Point your agent there.
 -- @changelog
+--   3.19.0: Faster command polling, read-only mix snapshots and validated batches.
+--   Bundles arrangement-midi and updated drum-humanize skill guidance.
+--   CLI and drum engines still require the repository clone.
 --   3.18.0: The bridge script CHANGED. The commands that write to disk are no
 --   longer one all-or-nothing switch. allow_risk_level_3 gated render, capture,
 --   save_project and the preference write together, so letting an agent MEASURE

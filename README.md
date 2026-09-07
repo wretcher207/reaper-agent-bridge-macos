@@ -43,6 +43,16 @@ and can **auto-discover** a drum kit's note map from the library's own
 
 Every mutating command runs inside a REAPER undo block (Cmd+Z / Ctrl+Z to revert).
 
+## MIDI workflow skills
+
+Version 3.19.0 includes two reusable agent skills:
+
+- [arrangement-midi](skills/arrangement-midi/SKILL.md): compose a part around the sounding arrangement, using a loaded virtual instrument.
+- [drum-humanize](skills/drum-humanize/SKILL.md): shape existing drum MIDI while preserving authored dynamics and explicit velocity-only requests.
+
+Point your agent at the relevant SKILL.md. ReaPack places these under the repository's `skills/` directory alongside `bridge/`; it does not register skills with an AI app.
+The one-line installer and Git clone include their CLI/engine dependencies.
+
 ## How it works
 
 A single runtime: the **Lua bridge** (`bridge/reaper_agent_bridge.lua`) runs
@@ -91,9 +101,8 @@ Prefer REAPER's own package manager? Add this repo to ReaPack:
 2. Paste: `https://github.com/wretcher207/reaper-daemon/raw/main/index.xml`
 3. `Extensions > ReaPack > Browse packages`, find **Reaper Daemon**, install.
 
-Two things to know, because ReaPack delivers only the two Lua files
-(`reaper_agent_bridge.lua` + `json.lua`) — not the agent CLI, the command
-examples, or the drum engine:
+ReaPack 3.19.0 includes both bridge Lua files, the two workflow skills, and the
+MIDI note writer. These installation details still apply:
 
 - **It does not auto-start.** ReaPack installs the bridge as an Action but does
   not run it on launch. Run the action once per session, or add it to your
@@ -104,7 +113,7 @@ examples, or the drum engine:
   NOT installed by ReaPack. For those, also clone the repo:
   `git clone https://github.com/wretcher207/reaper-daemon.git` and point your
   agent at the clone (or run `python3 setup/install.py` from the clone, which
-  handles auto-start too). ReaPack then just keeps the bridge script updated.
+  handles auto-start too). ReaPack keeps the bridge and bundled skills updated.
 - **Point your agent at the install folder.** ReaPack installs to
   `<REAPER resource>/Scripts/reaper-daemon/`. Right-click the package in
   ReaPack and "Show in explorer/finder" to get the exact path, then aim your
@@ -345,7 +354,7 @@ approval prompts — read the trust statement before first use.
 
 Full architecture, file protocol, money and liveness rules, and config
 reference: [`docs/CONSOLE.md`](docs/CONSOLE.md). The console is **clone-only**
-(not in the ReaPack package): ReaPack delivers Lua only, and the panel is
+(not in the ReaPack package): ReaPack does not include the console sidecar, and the panel is
 useless without the sidecar.
 
 ## Drum kits — any library, auto-discovered

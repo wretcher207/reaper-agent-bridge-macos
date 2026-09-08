@@ -245,6 +245,82 @@ eq(container_depth_of(m3, "SENTINEL_NEW"), 2, "single-line node didn't skew the 
 local m4, err4 = splice(B.split_lines("DATA only\nMORE"), fxbody, "FXCHAIN")
 ok(m4 == nil and err4 == "CHUNK_NO_TRACK_CLOSE", "malformed chunk returns an error code")
 
+;(function()
+  -- save_fx_chain: extract_fx_chain is the splicer's inverse. It must keep the
+  -- per-FX sequence REAPER's own "Save FX chain" keeps (BYPASS, the FX block with
+  -- its state, PRESETNAME, WAK), drop project-local lines (window geometry, FXID,
+  -- the chain UI header) and drop parameter envelopes, and count FX blocks so the
+  -- handler can refuse a file that disagrees with TrackFX_GetCount.
+  local extract = B.extract_fx_chain
+  local track_chunk = B.split_lines(table.concat({
+    "<TRACK {GUID}", 'NAME "bass"', "VOLPAN 1 0 -1 -1 1",
+    "<FXCHAIN", "WNDRECT 1976 87 1147 398", "SHOW 0", "LASTSEL 2", "DOCKED 0",
+    "BYPASS 0 0 0",
+    '<VST "VST3: CLA-76 Stereo (Waves)" "WaveShell1.vst3" 0 "" 1424951490{ABC} ""',
+    "  AAAAAAAA", "  BBBB",
+    ">",
+    "FLOATPOS 2589 132 755 332", "FXID {DC7F33E0-3FCE-4940-95CA-D6AFF6EF3849}", "WAK 0 0",
+    "BYPASS 0 0 0",
+    '<VST "VST: Decapitator (x86) (SoundToys)" Decapitator.dll 0 "" 1400128611<DEF> ""',
+    "  MDsN",
+    ">",
+    'PRESETNAME Default', "FLOATPOS 0 0 0 0", "FXID {A7A6A9EA}", "WAK 0 0",
+    "<PARMENV 3 0 1 0.5", "  PT 0 0.5 0", ">",
+    ">",
+    "<ITEM", "POSITION 0", "<SOURCE WAVE", 'FILE "x.wav"', ">", ">",
+    ">",
+  }, "\n"))
+  local body, n = extract(track_chunk, "FXCHAIN")
+  ok(body ~= nil, "extract: FXCHAIN found")
+  eq(n, 2, "extract: counts both FX blocks")
+  eq(body and balanced(body), true, "extract: body stays balanced")
+  eq(body[1], "BYPASS 0 0 0", "extract: first line is the first FX's BYPASS")
+  eq(body[#body], "WAK 0 0", "extract: last line is the last FX's WAK")
+  local joined = table.concat(body or {}, "\n")
+  ok(joined:find("AAAAAAAA", 1, true) and joined:find("MDsN", 1, true), "extract: plugin state blobs kept")
+  ok(joined:find("PRESETNAME Default", 1, true), "extract: PRESETNAME kept")
+  ok(not joined:find("FXID", 1, true), "extract: per-instance FXID dropped")
+  ok(not joined:find("FLOATPOS", 1, true) and not joined:find("WNDRECT", 1, true), "extract: window geometry dropped")
+  ok(not joined:find("SHOW 0", 1, true) and not joined:find("LASTSEL", 1, true) and not joined:find("DOCKED", 1, true), "extract: chain UI header dropped")
+  ok(not joined:find("PARMENV", 1, true) and not joined:find("PT 0", 1, true), "extract: parameter envelope dropped")
+  ok(not joined:find("ITEM", 1, true) and not joined:find("x.wav", 1, true), "extract: nothing outside FXCHAIN leaks")
+  
+  -- round trip: what extract lifts, splice puts back as direct children of FXCHAIN
+  local bare = B.split_lines(table.concat({ "<TRACK", 'NAME "scratch"', ">" }, "\n"))
+  local merged = splice(bare, body, "FXCHAIN")
+  ok(merged and balanced(merged), "extract->splice: merged chunk balanced")
+  local body2, n2 = extract(merged, "FXCHAIN")
+  eq(n2, 2, "extract->splice->extract: FX count preserved")
+  eq(table.concat(body2 or {}, "\n"), joined, "extract->splice->extract: body byte-identical")
+  
+  -- container detection: the chunk decides, not the track type
+  local cin = B.fx_chain_container_in
+  eq(cin(track_chunk), "FXCHAIN", "container_in: regular track chunk")
+  eq(cin({ "<TRACK", "<MASTERFXLIST", ">", ">" }), "MASTERFXLIST", "container_in: MASTERFXLIST chunk")
+  eq(cin({ "<TRACK", "NAME x", "<ITEM", "<FXCHAIN", ">", ">", ">" }), nil, "container_in: nested FXCHAIN at depth 2 is not the track's")
+  eq(cin({ "<TRACK", "NAME x", ">" }), nil, "container_in: no FX block yet")
+
+  -- master uses MASTERFXLIST; the wrong container name is not found
+  local master_chunk = B.split_lines(table.concat({
+    "<MASTERTRACK", "<MASTERFXLIST", "SHOW 0", "BYPASS 0 0 0", '<JS "utility/volume" ""', "  0", ">", "WAK 0 0", ">", ">",
+  }, "\n"))
+  local mb, mn = extract(master_chunk, "MASTERFXLIST")
+  eq(mn, 1, "extract: MASTERFXLIST parsed with JS counted")
+  local nb, nerr = extract(master_chunk, "FXCHAIN")
+  ok(nb == nil and nerr == "CHUNK_NO_FX_CONTAINER", "extract: missing container is an error code")
+  -- a chain that never closes fails loud
+  local open_chunk = B.split_lines(table.concat({ "<TRACK", "<FXCHAIN", "BYPASS 0 0 0" }, "\n"))
+  local ob, oerr = extract(open_chunk, "FXCHAIN")
+  ok(ob == nil and oerr == "CHUNK_UNCLOSED_CONTAINER", "extract: unclosed container is an error code")
+  -- an FX block containing a single-line node must not skew the count or depth
+  local inline_chunk = B.split_lines(table.concat({
+    "<TRACK", "<FXCHAIN", "BYPASS 0 0 0", '<VST "A"', "  data", "<INLINE foo>", "  more", ">", "WAK 0 0", ">", ">",
+  }, "\n"))
+  local ib, inum = extract(inline_chunk, "FXCHAIN")
+  eq(inum, 1, "extract: single-line node inside FX does not add an FX")
+  ok(ib and table.concat(ib, "\n"):find("<INLINE foo>", 1, true), "extract: single-line node kept verbatim")
+end)()
+
 -- Fix 1 (2026-07-02 review): startup requeue triage. A stranded processing/
 -- file must NOT re-run when it already executed (reply/archive exists) or when
 -- it is stale (its CLI reported TIMEOUT long ago); a fresh crash still re-runs.

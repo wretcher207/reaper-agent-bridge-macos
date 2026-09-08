@@ -610,6 +610,29 @@ chunk, and restores the original chain on any mismatch, so a parse bug can
 ever leave a half-merged track. Result carries `chain.fx_in_chain`,
 `fx_count_after`, and the added FX names.
 
+### save_fx_chain
+```json
+{ "target_track_name": "bass", "chain_name": "bass-mixing" }
+{ "target_track_name": "master", "chain_path": "C:/chains/mixbus.RfxChain", "overwrite": true }
+```
+The inverse of `add_fx_chain`: lifts the track's live FX chain out of its state
+chunk and writes it as a `.RfxChain` file, plugin state included. Plugin-native
+presets (Waves, Soundtoys) live inside each plugin's state blob, so they come
+along even though REAPER's preset API cannot name them. `chain_name` writes
+under REAPER's `FXChains` resource folder (a bare name, no path separators);
+`chain_path` is an explicit file. What is kept is exactly what REAPER's own
+"Save FX chain" keeps: per FX, its `BYPASS` line, the `<VST`/`<JS`/... block,
+`PRESETNAME`, and `WAK`. Window geometry, the chain's UI header, per-instance
+`FXID` lines, and parameter envelopes are this project's, not the chain's, and
+are dropped. Master tracks read `<MASTERFXLIST>`; input FX are not saved.
+
+Refuses with `CHAIN_EXISTS` when the file is already there unless
+`overwrite: true` (replacing a saved chain is the one loss here undo cannot
+reach), `CHAIN_NO_FX` on a track with no track FX, and
+`CHAIN_EXTRACT_MISMATCH` when the parsed FX count disagrees with
+`TrackFX_GetCount`, so a parser gap can never ship a chain that "saved fine".
+Result carries `chain.path`, `chain.fx_in_chain`, the FX names, and `overwrote`.
+
 ### remove_fx / bypass_fx / move_fx
 ```json
 { "target_track_name": "Gtr DI", "fx_name_contains": "ReaEQ" }

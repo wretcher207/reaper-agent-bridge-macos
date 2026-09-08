@@ -1,5 +1,5 @@
 -- @description Reaper Daemon (REAPER agent file bridge)
--- @version 3.19.0
+-- @version 3.20.0
 -- @author Dead Pixel Design
 -- @link https://github.com/wretcher207/reaper-daemon
 -- @provides
@@ -18,6 +18,8 @@
 --   root (where inbox/ and outbox/ are created on first run) is the folder one
 --   level up from this script. Point your agent there.
 -- @changelog
+--   3.20.0: save_fx_chain, the inverse of add_fx_chain: lift a track's live FX
+--   chain (plugin state included) into a .RfxChain recipe file.
 --   3.19.0: Faster command polling, read-only mix snapshots and validated batches.
 --   Bundles arrangement-midi and updated drum-humanize skill guidance.
 --   CLI and drum engines still require the repository clone.
@@ -3464,7 +3466,33 @@ end
 -- or worse, silently mangles). Data lines never start with '<' or equal '>'
 -- (brackets inside values are quoted), so they read as depth-0.
 -- Returns merged_lines, or nil + an error code.
-local function splice_fx_chain(lines, body_lines, container)
+--
+-- fx_chain holds the chain helpers as one table: the main chunk is at Lua's
+-- 200-local limit, so new top-level names go on a table, not into locals.
+local fx_chain = {}
+
+-- Which FX container a track chunk actually carries at depth 1: "FXCHAIN" or
+-- "MASTERFXLIST", or nil when the track has no FX block yet. The .rpp stores
+-- the master's FX as <MASTERFXLIST>, but GetTrackStateChunk on the master
+-- hands back <FXCHAIN> like any other track (live: 2026-09-08, the first
+-- master save failed with CHUNK_NO_FX_CONTAINER against the guess). Read the
+-- chunk instead of guessing from the track type.
+function fx_chain.container_in(lines)
+  local depth = 0
+  for i = 1, #lines do
+    local t = lines[i]:match("^%s*(.-)%s*$")
+    local opens = t:sub(1, 1) == "<"
+    local single = opens and t:sub(-1) == ">"
+    if opens and not single and depth == 1 then
+      local key = t:match("^<([%w_]+)")
+      if key == "FXCHAIN" or key == "MASTERFXLIST" then return key end
+    end
+    if opens and not single then depth = depth + 1 elseif t == ">" then depth = depth - 1 end
+  end
+  return nil
+end
+
+function fx_chain.splice(lines, body_lines, container)
   local open_idx, close_idx, depth = nil, nil, 0
   for i = 1, #lines do
     local t = lines[i]:match("^%s*(.-)%s*$")
@@ -3515,8 +3543,6 @@ end
 local function command_add_fx_chain(command)
   local payload = command.payload or {}
   local track = find_track(payload)
-  -- The master stores its FX under <MASTERFXLIST>; regular tracks use <FXCHAIN>.
-  local container = is_master_track(track) and "MASTERFXLIST" or "FXCHAIN"
 
   local name = payload.chain_name or payload.fx_chain or payload.name
   local path = payload.chain_path
@@ -3549,7 +3575,11 @@ local function command_add_fx_chain(command)
   local ok_chunk, chunk = reaper.GetTrackStateChunk(track, "", false)
   if not ok_chunk then error("CHUNK_READ_FAILED: GetTrackStateChunk returned false") end
 
-  local merged, splice_err = splice_fx_chain(split_lines(chunk), body_lines, container)
+  -- Splice into whichever container the chunk carries; a track with no FX yet
+  -- gets a fresh <FXCHAIN>, which is what REAPER hands back for master too.
+  local chunk_lines = split_lines(chunk)
+  local container = fx_chain.container_in(chunk_lines) or "FXCHAIN"
+  local merged, splice_err = fx_chain.splice(chunk_lines, body_lines, container)
   if not merged then error(splice_err .. ": malformed track chunk") end
 
   -- Snapshot the FX count, write, then verify it grew by exactly the chain's FX.
@@ -3577,6 +3607,124 @@ local function command_add_fx_chain(command)
     chain = { name = name or path, path = path, fx_in_chain = fx_in_chain },
     fx_count_after = fx_after,
     fx = fx_names,
+  }
+end
+
+-- Inverse of splice_fx_chain: lift the FX blocks out of a track chunk's
+-- top-level <FXCHAIN>/<MASTERFXLIST> as a .RfxChain body. Pure + testable.
+--
+-- What REAPER's own "Save FX chain" keeps is the per-FX sequence (BYPASS,
+-- the <VST/JS/...> block with its state, PRESETNAME, WAK). Window geometry
+-- (WNDRECT, FLOATPOS), the chain's UI header (SHOW, LASTSEL, DOCKED) and the
+-- per-instance FXID are this project's, not the chain's, and are dropped;
+-- parameter envelopes (<PARMENV>, <PROGRAMENV>) are automation on this track,
+-- not chain state, and are dropped too. Everything else passes through so a
+-- chain re-splices to the same plugin state add_fx_chain proved round-trips.
+-- Returns body_lines, fx_count, or nil + an error code.
+function fx_chain.extract(lines, container)
+  local depth, in_chain, chain_depth = 0, false, nil
+  local body, fx_count = {}, 0
+  local skip_depth = nil   -- depth at which a dropped nested block opened
+  for i = 1, #lines do
+    local raw = lines[i]
+    local t = raw:match("^%s*(.-)%s*$")
+    local opens = t:sub(1, 1) == "<"
+    local single = opens and t:sub(-1) == ">"
+    local closes = t == ">"
+    if not in_chain then
+      if opens and not single and depth == 1
+         and (t == "<" .. container or t:find("^<" .. container .. "%s")) then
+        in_chain, chain_depth = true, depth + 1
+      end
+    else
+      if closes and depth == chain_depth then
+        return body, fx_count           -- the container just closed
+      end
+      if skip_depth then
+        -- inside a dropped block: consume until it closes
+      elseif depth == chain_depth then
+        local key = t:match("^<?([%w_]+)")
+        if opens and not single then
+          if key == "PARMENV" or key == "PROGRAMENV" then
+            skip_depth = depth + 1
+          else
+            if key == "VST" or key == "JS" or key == "AU" or key == "CLAP"
+               or key == "LV2" or key == "DX" then fx_count = fx_count + 1 end
+            body[#body + 1] = t
+          end
+        elseif key == "WNDRECT" or key == "SHOW" or key == "LASTSEL"
+               or key == "DOCKED" or key == "FLOATPOS" or key == "FXID" then
+          -- project-local UI/identity lines: dropped
+        else
+          body[#body + 1] = t
+        end
+      else
+        body[#body + 1] = t             -- inside an FX block: verbatim (trimmed)
+      end
+    end
+    if opens and not single then
+      depth = depth + 1
+    elseif closes then
+      depth = depth - 1
+      if skip_depth and depth < skip_depth then skip_depth = nil end
+    end
+  end
+  if in_chain then return nil, "CHUNK_UNCLOSED_CONTAINER" end
+  return nil, "CHUNK_NO_FX_CONTAINER"
+end
+
+-- Save a track's live FX chain, state and all, as a .RfxChain file: the
+-- inverse of add_fx_chain, so a chain dialed in by hand becomes a recipe the
+-- bridge can rebuild on any track. Plugin-native presets (Waves, Soundtoys)
+-- live inside the plugin's state blob, so they come along even though REAPER's
+-- preset API cannot name them. Refuses to overwrite unless asked: replacing a
+-- saved chain is the one loss undo cannot reach here.
+function fx_chain.save_command(command)
+  local payload = command.payload or {}
+  local track = find_track(payload)
+
+  local name = payload.chain_name or payload.name
+  local path = payload.chain_path
+  if not path or path == "" then
+    if not name or name == "" then
+      error("BAD_CHAIN_NAME: Provide chain_name (saved under FXChains) or chain_path")
+    end
+    local base = tostring(name):gsub("%.RfxChain$", "")
+    if base:find("[/\\]") or base:find("%.%.") then
+      error("BAD_CHAIN_NAME: chain_name must be a bare name, not a path")
+    end
+    path = join(reaper.GetResourcePath(), "FXChains", base .. ".RfxChain")
+  end
+  if exists(path) and payload.overwrite ~= true then
+    error("CHAIN_EXISTS: " .. tostring(path) .. " (send overwrite: true to replace it)")
+  end
+
+  local ok_chunk, chunk = reaper.GetTrackStateChunk(track, "", false)
+  if not ok_chunk then error("CHUNK_READ_FAILED: GetTrackStateChunk returned false") end
+  local chunk_lines = split_lines(chunk)
+  local container = fx_chain.container_in(chunk_lines)
+  if not container then error("CHAIN_NO_FX: " .. track_summary(track).name .. " has no FX chain to save") end
+  local body, count_or_err = fx_chain.extract(chunk_lines, container)
+  if not body then error(count_or_err .. ": track chunk has no readable " .. container) end
+  if count_or_err == 0 then error("CHAIN_NO_FX: " .. track_summary(track).name .. " has no track FX to save") end
+  -- The chunk's FX count is the truth the file must match; a parse that drops
+  -- or doubles a block would otherwise ship a chain that "saved fine".
+  local live = reaper.TrackFX_GetCount(track)
+  if count_or_err ~= live then
+    error("CHAIN_EXTRACT_MISMATCH: parsed " .. count_or_err .. " FX blocks, track has " .. live)
+  end
+
+  write_file(path, table.concat(body, "\n") .. "\n")
+  local fx_names = {}
+  for i = 0, live - 1 do
+    local _, fxname = reaper.TrackFX_GetFXName(track, i, "")
+    fx_names[#fx_names + 1] = fxname
+  end
+  return {
+    track = track_summary(track),
+    chain = { name = name or path, path = path, fx_in_chain = live, container = container },
+    fx = fx_names,
+    overwrote = payload.overwrite == true,
   }
 end
 
@@ -4773,6 +4921,7 @@ handlers.commit_preview = command_commit_preview
 -- FX
 handlers.add_fx = command_add_fx
 handlers.add_fx_chain = command_add_fx_chain
+handlers.save_fx_chain = fx_chain.save_command
 handlers.remove_fx = command_remove_fx
 handlers.bypass_fx = command_bypass_fx
 handlers.move_fx = command_move_fx
@@ -5491,7 +5640,9 @@ if _G.REAPER_BRIDGE_SELFTEST then
     numeric_bracket = numeric_bracket,
     atomic_write_json = atomic_write_json,
     split_lines = split_lines,
-    splice_fx_chain = splice_fx_chain,
+    splice_fx_chain = fx_chain.splice,
+    extract_fx_chain = fx_chain.extract,
+    fx_chain_container_in = fx_chain.container_in,
     parse_created_at = parse_created_at,
     requeue_decision = requeue_decision,
     error_code_from = error_code_from,

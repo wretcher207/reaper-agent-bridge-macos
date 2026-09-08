@@ -706,3 +706,88 @@ def test_reply_wait_starts_fast_then_backs_off(root, monkeypatch):
     assert delays[0] == 0.005
     assert delays[-1] == 0.025
     assert not list(__import__('pathlib').Path(root, 'inbox').glob('*.json'))
+
+
+# --- save-chain / snapshot-chains (2026-09-08) ------------------------------
+
+@pytest.mark.parametrize("name, slug", [
+    ("bass", "bass"),
+    ("Kick - stem", "kick"),
+    ("Floor-R1 - stem", "floor-r1"),
+    ("gtr-buss", "gtr-buss"),
+    ("Overheads  (OH) ", "overheads-oh"),
+    ("MASTER", "master"),
+    ("---", "track"),
+])
+def test_chain_slug(name, slug):
+    assert reaperd.chain_slug(name) == slug
+
+
+def _recording_send_type(replies):
+    """Scripted send_type that also keeps every payload for assertions."""
+    sent = []
+
+    def fake(cmd_type, payload, **kw):
+        sent.append((cmd_type, dict(payload)))
+        return replies.pop(0)
+    fake.sent = sent
+    return fake
+
+
+def test_save_chain_defaults_name_to_slug_and_forwards_overwrite(monkeypatch, root):
+    fake = _recording_send_type([{"ok": True, "data": {
+        "chain": {"path": "X/FXChains/kick.RfxChain", "fx_in_chain": 1}}}])
+    monkeypatch.setattr(reaperd, "send_type", fake)
+    args = argparse.Namespace(track="Kick - stem", name=None, overwrite=True, bridge_root=root)
+    assert reaperd.cmd_save_chain(args) == 0
+    assert fake.sent == [("save_fx_chain", {
+        "target_track_name": "Kick - stem", "chain_name": "kick", "overwrite": True})]
+
+
+def test_save_chain_refusal_exits_1(monkeypatch, root):
+    monkeypatch.setattr(reaperd, "send_type", _recording_send_type([
+        {"ok": False, "error": {"code": "CHAIN_EXISTS", "details": "x"}}]))
+    args = argparse.Namespace(track="bass", name="bass-mixing", overwrite=False, bridge_root=root)
+    assert reaperd.cmd_save_chain(args) == 1
+
+
+CTX = {"ok": True, "data": {"tracks": [
+    {"index": 1, "name": "gtr-buss", "fx": [{"name": "Pro-Q 4"}, {"name": "Axx"}]},
+    {"index": 2, "name": "gtr-left", "fx": []},
+    {"index": 7, "name": "Kick - stem", "fx": [{"name": "Bass Mint"}]},
+    {"index": 0, "name": "MASTER", "fx": [{"name": "Poseidon"}]},
+]}}
+
+
+def test_snapshot_chains_saves_only_tracks_with_fx_and_addresses_master(monkeypatch, root, capsys):
+    fake = _recording_send_type([dict(CTX)] + [{"ok": True, "data": {}}] * 3)
+    monkeypatch.setattr(reaperd, "send_type", fake)
+    args = argparse.Namespace(prefix="dis-", overwrite=False, dry_run=False, bridge_root=root)
+    assert reaperd.cmd_snapshot_chains(args) == 0
+    saves = [p for t, p in fake.sent if t == "save_fx_chain"]
+    assert [p["target_track_name"] for p in saves] == ["gtr-buss", "Kick - stem", "master"]
+    assert [p["chain_name"] for p in saves] == ["dis-gtr-buss", "dis-kick", "dis-master"]
+    assert all(p["overwrite"] is False for p in saves)
+    assert "saved   'gtr-left'" not in capsys.readouterr().out
+
+
+def test_snapshot_chains_dry_run_sends_no_saves(monkeypatch, root, capsys):
+    fake = _recording_send_type([dict(CTX)])
+    monkeypatch.setattr(reaperd, "send_type", fake)
+    args = argparse.Namespace(prefix="", overwrite=False, dry_run=True, bridge_root=root)
+    assert reaperd.cmd_snapshot_chains(args) == 0
+    assert [t for t, _ in fake.sent] == ["get_context"]
+    assert capsys.readouterr().out.count("would save") == 3
+
+
+def test_snapshot_chains_reports_existing_as_skipped_and_exits_1(monkeypatch, root, capsys):
+    fake = _recording_send_type([dict(CTX),
+        {"ok": True, "data": {}},
+        {"ok": False, "error": {"code": "CHAIN_EXISTS", "details": "kick.RfxChain"}},
+        {"ok": True, "data": {}}])
+    monkeypatch.setattr(reaperd, "send_type", fake)
+    args = argparse.Namespace(prefix="", overwrite=False, dry_run=False, bridge_root=root)
+    assert reaperd.cmd_snapshot_chains(args) == 1
+    out = capsys.readouterr().out
+    assert "skipped 'Kick - stem' -> kick.RfxChain exists" in out
+    assert out.count("saved") == 2

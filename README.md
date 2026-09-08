@@ -181,6 +181,8 @@ python3 reaperd.py status                       # liveness check (run first)
 python3 reaperd.py send <cmd.json> --wait       # send a command file
 python3 reaperd.py cmd <type> '<payload-json>'  # send by type + payload
 python3 reaperd.py fxload "<plugin query>" <track|master>
+python3 reaperd.py save-chain <track|master> [--name NAME] [--overwrite]   # live FX chain -> .RfxChain
+python3 reaperd.py snapshot-chains [--prefix P] [--overwrite] [--dry-run]  # every track with FX
 python3 reaperd.py setparam <track> "<fx>" "<param>" "<display value>"
 python3 reaperd.py eq <track> "<fx>" <band> <freqHz> <gaindB> [Q]
 python3 reaperd.py measure <track> [--seconds N] [--start S] [--json]

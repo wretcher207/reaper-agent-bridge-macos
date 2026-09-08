@@ -780,6 +780,69 @@ def cmd_fxload(args):
     return _exit_for(res)
 
 
+def chain_slug(track_name):
+    """Chain file name for a track: lowercase, runs of non-alphanumerics become
+    one hyphen, and a trailing ' - stem' (REAPER's stem-render suffix) goes,
+    so 'Kick - stem' saves as 'kick', not 'kick-stem'. 'MASTER' is 'master'."""
+    base = re.sub(r"\s*-\s*stem\s*$", "", track_name, flags=re.IGNORECASE)
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", base).strip("-").lower()
+    return slug or "track"
+
+
+def cmd_save_chain(args):
+    name = args.name or chain_slug(args.track)
+    res = send_type("save_fx_chain",
+                    {"target_track_name": args.track, "chain_name": name,
+                     "overwrite": bool(args.overwrite)},
+                    bridge_root=args.bridge_root, verbose=False)
+    if res.get("ok"):
+        d = res.get("data") or {}
+        print(f"[save-chain] {args.track} -> {d.get('chain', {}).get('path')}  "
+              f"({d.get('chain', {}).get('fx_in_chain')} FX)")
+    print(json.dumps(res, separators=(",", ":")))
+    return _exit_for(res)
+
+
+def cmd_snapshot_chains(args):
+    """Every track with track FX, master included, becomes one .RfxChain named
+    by its slug. Existing files are skipped (reported) unless --overwrite, so a
+    re-run after one dialed-in change never silently replaces the others."""
+    ctx = send_type("get_context", {}, bridge_root=args.bridge_root, verbose=False)
+    if not ctx.get("ok"):
+        print(json.dumps(ctx, separators=(",", ":")))
+        return _exit_for(ctx)
+    tracks = (ctx.get("data") or {}).get("tracks") or []
+    rows = []
+    for t in tracks:
+        if not t.get("fx"):
+            continue
+        track = "master" if t.get("index") == 0 else t.get("name", "")
+        name = f"{args.prefix}{chain_slug(track)}"
+        rows.append((track, name, len(t["fx"])))
+    if not rows:
+        print("[snapshot-chains] no tracks with FX in the open project")
+        return 1
+    failures = 0
+    for track, name, count in rows:
+        if args.dry_run:
+            print(f"[snapshot-chains] would save {track!r} -> {name}.RfxChain ({count} FX)")
+            continue
+        res = send_type("save_fx_chain",
+                        {"target_track_name": track, "chain_name": name,
+                         "overwrite": bool(args.overwrite)},
+                        bridge_root=args.bridge_root, verbose=False)
+        if res.get("ok"):
+            print(f"[snapshot-chains] saved   {track!r} -> {name}.RfxChain ({count} FX)")
+        else:
+            code = (res.get("error") or {}).get("code") or "?"
+            if code == "CHAIN_EXISTS":
+                print(f"[snapshot-chains] skipped {track!r} -> {name}.RfxChain exists (use --overwrite)")
+            else:
+                print(f"[snapshot-chains] FAILED  {track!r}: {code}")
+            failures += 1
+    return 1 if failures else 0
+
+
 def cmd_setparam(args):
     br = args.bridge_root
     # 1. Resolve track -> guid (or master).
@@ -1772,6 +1835,20 @@ def build_parser():
     s.add_argument("track", nargs="?", default="master",
                    help="track name or 'master' (default: master)")
     s.set_defaults(func=cmd_fxload)
+
+    s = sub.add_parser("save-chain",
+                       help="save one track's live FX chain (state included) as a .RfxChain")
+    s.add_argument("track", help="track name or 'master'")
+    s.add_argument("--name", help="chain name under REAPER's FXChains (default: track slug)")
+    s.add_argument("--overwrite", action="store_true", help="replace an existing chain file")
+    s.set_defaults(func=cmd_save_chain)
+
+    s = sub.add_parser("snapshot-chains",
+                       help="save every track's live FX chain (master included) as .RfxChain files")
+    s.add_argument("--prefix", default="", help="prepended to each chain name, e.g. 'disgrace-'")
+    s.add_argument("--overwrite", action="store_true", help="replace existing chain files")
+    s.add_argument("--dry-run", action="store_true", help="list what would be saved, save nothing")
+    s.set_defaults(func=cmd_snapshot_chains)
 
     s = sub.add_parser("setparam", help="set any plugin parameter, with verify")
     s.add_argument("track", help="track name or 'master'")

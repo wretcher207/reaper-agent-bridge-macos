@@ -1,45 +1,55 @@
-# The agent CLI — `reaperd.py`
+# The CLI
 
-One Python entry point for everything an agent does (no shell helpers, no
-`jq`/`grep` pipelines — works identically on macOS, Windows, Linux):
+`reaperd.py` is the one entry point for everything an agent does. No shell
+helpers, no `jq` or `grep` pipelines. It behaves the same on macOS, Windows,
+and Linux.
 
-```bash
-python3 reaperd.py status                       # liveness check (run first)
-python3 reaperd.py send <cmd.json> --wait       # send a command file
-python3 reaperd.py cmd <type> '<payload-json>'  # send by type + payload
-python3 reaperd.py fxload "<plugin query>" <track|master>
-python3 reaperd.py save-chain <track|master> [--name NAME] [--overwrite]   # live FX chain -> .RfxChain
-python3 reaperd.py snapshot-chains [--prefix P] [--overwrite] [--dry-run]  # every track with FX
-python3 reaperd.py setparam <track> "<fx>" "<param>" "<display value>"
-python3 reaperd.py eq <track> "<fx>" <band> <freqHz> <gaindB> [Q]
-python3 reaperd.py measure <track> [--seconds N] [--start S] [--json]
-python3 reaperd.py verify <track> [--seconds N] [--json] -- <type> '<payload-json>'
-python3 reaperd.py profile <project.rpp> <track> [--start-bar N] [--bars N] [--max-seconds S]
-python3 reaperd.py groove <beat.dsl> --track Drums [--position SEC] [--map NAME]
-python3 reaperd.py jam                          # DSL drum beat from stdin -> selected track
-python3 reaperd.py humanize --track Drums [--amount 0-100] [--follow-lead] [--dry-run]
-python3 reaperd.py shred --track argent-l [--part guitar|bass] [--bars-file riff.txt] [--seed N]
-python3 reaperd.py band                         # 2 guitars + bass + drums, one command
-python3 reaperd.py list-maps                    # available drum-kit maps
-python3 reaperd.py discover-map <track> [--save <name>]
-python3 reaperd.py add-map <name> --file <map.json>   # or --roles '{...}' / stdin
-python3 reaperd.py remove-map <name>
-```
+## Commands
 
-`fxload` and `cmd add_fx` resolve a fuzzy plugin query to REAPER's exact
-installed name from the VST/CLAP/AU cache before loading. `setparam` works on
-any plugin by parameter index, binary-searching the normalized value that
-produces a target display value, then verifying.
+| Command | What it does |
+| --- | --- |
+| `status` | liveness check. Run it first. |
+| `send <cmd.json> --wait` | send a command file and print the reply |
+| `cmd <type> '<payload-json>'` | send a command by type and payload |
+| `fxload "<plugin query>" <track\|master>` | load a plugin by fuzzy name |
+| `save-chain <track\|master> [--name NAME] [--overwrite]` | live FX chain to `.RfxChain` |
+| `snapshot-chains [--prefix P] [--overwrite] [--dry-run]` | save every track's chain |
+| `setparam <track> "<fx>" "<param>" "<display value>"` | set any parameter by display value |
+| `eq <track> "<fx>" <band> <freqHz> <gaindB> [Q]` | set one EQ band |
+| `measure <track> [--seconds N] [--start S] [--json]` | capture and measure one track |
+| `verify <track> [--seconds N] [--json] -- <type> '<payload>'` | mutate with pre/post proof |
+| `profile <project.rpp> <track> [--start-bar N] [--bars N] [--max-seconds S]` | analyze a stem for drum planning |
+| `groove <beat.dsl> --track Drums [--position SEC] [--map NAME]` | render a drum DSL to a track |
+| `jam` | drum DSL from stdin to the selected track |
+| `humanize --track Drums [--amount 0-100] [--follow-lead] [--dry-run]` | humanize an existing drum take |
+| `shred --track T [--part guitar\|bass] [--bars-file riff.txt] [--seed N]` | render a guitar or bass riff |
+| `band` | two guitars, bass, and drums in one command |
+| `list-maps` | available drum-kit maps |
+| `discover-map <track> [--save <name>]` | build a kit map from a track's note names |
+| `add-map <name> --file <map.json>` | add a kit map by hand (or `--roles '{...}'`, or stdin) |
+| `remove-map <name>` | remove a kit map |
 
-`measure` captures one track once (behind the same `allow_audio_writes` gate
-as `capture_track_audio`) and prints measured audio metrics: LUFS-I whenever
-REAPER reports it (digital silence reads as null and is flagged), plus — when
-[Post Mortem](https://github.com/wretcher207/post-mortem) is installed —
+## Notes
+
+**Plugin loading.** `fxload` and `cmd add_fx` resolve a fuzzy query to
+REAPER's exact installed name from the VST, CLAP, and AU cache before loading.
+
+**Parameters.** `setparam` works on any plugin by parameter index. It
+binary-searches the normalized value that produces the target display value,
+then verifies the result.
+
+**Measuring.** `measure` captures one track once, behind the same
+`allow_audio_writes` gate as `capture_track_audio`. It always reports LUFS-I
+when REAPER provides it. Digital silence reads as null and is flagged. With
+[Post Mortem](https://github.com/wretcher207/post-mortem) installed it adds
 sample peak, RMS, crest factor, 1/3-octave spectrum, stereo image, and a
-silence check. Bounds are resolved once (time selection start if active, else
-edit cursor; override with `--start`) and passed explicitly; to compare two
-separate runs of the same spot, pass the same `--start`/`--seconds` to both.
-The output labels its `metrics_source` (`postmortem` or `render_stats`) and
-its capture scope — full-mix fallbacks are reported honestly, never presented
-as per-track evidence.
+silence check.
 
+Bounds resolve once: time selection start if active, otherwise the edit
+cursor. Override with `--start`. To compare two runs of the same spot, pass
+the same `--start` and `--seconds` to both. Output labels its `metrics_source`
+(`postmortem` or `render_stats`) and its capture scope. A full-mix fallback
+is reported as such, never as per-track evidence.
+
+Drum, guitar, and verify commands have their own pages:
+[Drums](drums.md), [Guitar and bass](guitar-bass.md), [Verify](verify.md).

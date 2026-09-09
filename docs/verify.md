@@ -1,9 +1,10 @@
-# Closed-loop verify — mix moves with measured proof
+# Verify
 
-Every mutating command returns `ok: true`, but `ok` only means "REAPER did
-it" — not "the mix got better". `verify` closes that loop: it captures the
-track, runs your command, captures the **same spot** again, and reports what
-actually changed in the audio.
+Every mutating command returns `ok: true`. That means REAPER did it, not that
+the mix got better. `verify` closes the loop: capture the track, run the
+command, capture the same spot again, report what changed in the audio.
+
+## Example
 
 ```bash
 python3 reaperd.py verify Bass -- set_fx_param \
@@ -19,34 +20,43 @@ python3 reaperd.py verify Bass -- set_fx_param \
 [verify] VERDICT: VERIFIED
 ```
 
-Exit codes are the contract (agents branch on them): `0` VERIFIED (both
-captures clean and comparable, deltas reported), `1` REFUSED (the mutation
-was never sent: the pre-capture was blocked or silent, so nothing was
-mutated), `2` UNVERIFIED: the mutation was sent and the project **may have
-changed** but the change could not be verified. Exit 2 covers: post-capture
-failed or silent, a partially-applied `batch` (the bridge keeps sub-commands
-that ran before the failure), a bridge rejection (the JSON carries the
-rejection code; a handler that failed mid-edit can leave a partial change
-inside one closed undo block, indistinguishable from a clean resolution
-rejection from outside), a mutation whose reply timed out or could not be
-read (it may have executed, or may execute later), and pre/post captures
-that stopped being comparable (track identity or capture scope changed
-mid-verify). Nothing is ever rolled back automatically (one Ctrl/Cmd+Z
-reverts it), and an agent must NOT blindly retry on exit 2: the change may
-already be live.
+## Exit codes
 
-Honest limits, by design:
+Agents branch on these.
 
-- Bounds are frozen once, before the mutation: pre and post captures use the
-  byte-identical `start_seconds`/`duration_seconds`, so a moved cursor or
-  time selection between captures cannot skew the comparison.
-- With Post Mortem installed you get per-band spectrum deltas, true peak,
-  RMS, and stereo-image deltas; without it, LUFS-I deltas only (the report
-  labels its `metrics_source`).
+| Exit | Verdict | Meaning |
+| --- | --- | --- |
+| 0 | VERIFIED | both captures clean and comparable, deltas reported |
+| 1 | REFUSED | the mutation was never sent. The pre-capture was blocked or silent, so nothing changed. |
+| 2 | UNVERIFIED | the mutation was sent and the project may have changed, but the change could not be verified |
+
+Exit 2 covers:
+
+- post-capture failed or silent
+- a partially applied `batch` (the bridge keeps sub-commands that ran before
+  the failure)
+- a bridge rejection. The JSON carries the rejection code. A handler that
+  failed mid-edit can leave a partial change inside one closed undo block,
+  which looks the same from outside as a clean rejection.
+- a mutation whose reply timed out or could not be read. It may have
+  executed, or may execute later.
+- pre and post captures that stopped being comparable because track identity
+  or capture scope changed mid-verify
+
+Nothing is rolled back automatically. One Ctrl/Cmd+Z reverts it. An agent
+must not blindly retry on exit 2, because the change may already be live.
+
+## Limits
+
+- Bounds are frozen once, before the mutation. Pre and post captures use
+  identical `start_seconds` and `duration_seconds`, so a moved cursor or time
+  selection between captures cannot skew the comparison.
+- With [Post Mortem](https://github.com/wretcher207/post-mortem) installed you
+  get per-band spectrum, true peak, RMS, and stereo-image deltas. Without it,
+  LUFS-I deltas only. The report labels its `metrics_source`.
 - If either capture is not a verified isolated track (some tracks fall back
   to a full-mix render), the report says the deltas describe the capture
-  scope — it never presents full-mix deltas as per-track evidence.
+  scope. It never presents full-mix deltas as per-track evidence.
 - A silent capture refuses a verdict rather than comparing dead air.
-- Two renders per verify: each capture blocks REAPER's UI for the render
-  duration (default 10 s of audio; keep `--seconds` short).
-
+- Two renders per verify. Each capture blocks REAPER's UI for the render
+  duration. Default is 10 seconds of audio. Keep `--seconds` short.

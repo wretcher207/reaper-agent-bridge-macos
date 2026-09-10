@@ -1,15 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Historical sources track raw/main so ReaPack always serves the current bridge instead
-     of a pinned commit that silently drifts behind HEAD. @version here MUST move
-     in lockstep with @version in bridge/reaper_agent_bridge.lua on every release,
-     and these fixes must be merged to main before this is published. A tagged,
-     pin-verified release pipeline is the proper next step (review Next-Level #3). -->
+<!-- New releases pin sources to their release tag. Historical entries retain their original URLs. -->
 <index version="1" name="reaper-daemon" commit="main">
   <category name="bridge">
     <reapack name="reaper_agent_bridge.lua" type="script" desc="Reaper Daemon (REAPER agent file bridge)">
       <metadata>
         <link rel="website" href="https://github.com/wretcher207/reaper-daemon">Reaper Daemon on GitHub</link>
       </metadata>
+      <version name="3.20.0" author="Dead Pixel Design" time="2026-09-10T17:29:55Z">
+        <changelog><![CDATA[Save live FX chains and capture a mix recipe with track settings, routing, automation and plugin state. Compare the recipe with the current session or rebuild it without media in a separate project tab. The source project stays open. External samples and IRs are referenced, not bundled. Opaque plugin-state differences require review; matching exposed parameters does not prove identical audio. Recipe CLI and MCP commands require the repository installation.]]></changelog>
+        <source main="main">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.20.0/bridge/reaper_agent_bridge.lua</source>
+        <source file="json.lua">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.20.0/bridge/json.lua</source>
+        <source file="../skills/arrangement-midi/SKILL.md">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.20.0/skills/arrangement-midi/SKILL.md</source>
+        <source file="../skills/arrangement-midi/references/midi-plan.md">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.20.0/skills/arrangement-midi/references/midi-plan.md</source>
+        <source file="../skills/arrangement-midi/scripts/midi_plan.py">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.20.0/skills/arrangement-midi/scripts/midi_plan.py</source>
+        <source file="../skills/drum-humanize/SKILL.md">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.20.0/skills/drum-humanize/SKILL.md</source>
+        <source file="../skills/drum-humanize/references/planning.md">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.20.0/skills/drum-humanize/references/planning.md</source>
+      </version>
       <version name="3.19.0" author="Dead Pixel Design" time="2026-09-07T21:30:28Z">
         <changelog><![CDATA[Faster command polling, read-only mix snapshots, and validated batches. Includes arrangement-midi for composing through a loaded virtual instrument and updated drum-humanize guidance for preserving authored dynamics and shaping phrases. ReaPack now includes both skill instructions and the MIDI note writer. The CLI and drum engines still require a repository clone. This packages the workflows; it does not add an audio transcription engine or change the humanization algorithms.]]></changelog>
         <source main="main">https://raw.githubusercontent.com/wretcher207/reaper-daemon/v3.19.0/bridge/reaper_agent_bridge.lua</source>

@@ -60,4 +60,4 @@ CLI verify exit code 2 means the mutation may already have happened but verifica
 failed. Do not retry blindly. Report it as unverified and explain that one REAPER undo
 reverts the attempted change.
 
-Current status and release facts belong in `HANDOFF.md`, not here.
+Current status and release facts belong in `HANDOFF.md`. Public documentation and UI copy require the appropriate voice-profile pass from the shared working agreement; live music operations do not require a writing workflow.

@@ -1042,3 +1042,26 @@ Place a final snapshot in a batch to read back state after successful writes.
 Replies additionally expose `timing.setup_ms`, `timing.execute_ms`, and
 `timing.defer_gap_ms` when available. These are bridge-side durations, not
 end-to-end latency; serialization/publication and client wait are excluded.
+
+
+### capture_mix_recipe
+
+`{}` captures the active, stopped project in one bridge call. Optional
+`project_index` selects a zero-based open tab for inspection and restores the
+original tab afterward. The result is `reaper-mix-recipe-v1`: media-free native
+track chunks (master last), exposed FX parameters, envelope summaries, tempo and
+time-signature markers. Shared automation-item pools are not supported and refuse
+capture. No project write or undo point is created.
+
+### rebuild_mix_recipe
+
+`{"recipe": <capture result>, "dry_run": true}` validates a recipe without edits.
+Omit `dry_run` or set it to false to create a separate project tab, ignoring the
+default template. The original tab is restored afterward. Existing tracks are
+never replaced. The result includes `rebuilt` (a fresh recipe capture), `new_tab`,
+`source_restored`, and `media_items: 0`. Failed loading retains the partial new tab
+and restores the original. The operation manages its own undo block and cannot
+run inside `batch`. A timeout does not mean that no tab was created.
+
+The CLI and MCP `mix_recipe` tool compare the returned capture and report
+`verification`, including opaque state differences. See [Mix recipes](../docs/mix-recipes.md).

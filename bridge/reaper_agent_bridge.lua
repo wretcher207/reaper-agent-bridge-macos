@@ -18,6 +18,7 @@
 --   root (where inbox/ and outbox/ are created on first run) is the folder one
 --   level up from this script. Point your agent there.
 -- @changelog
+--   Mix recipes: capture track state without media, compare locally, rebuild in a new tab.
 --   3.20.0: save_fx_chain, the inverse of add_fx_chain: lift a track's live FX
 --   chain (plugin state included) into a .RfxChain recipe file.
 --   3.19.0: Faster command polling, read-only mix snapshots and validated batches.
@@ -3471,6 +3472,155 @@ end
 -- 200-local limit, so new top-level names go on a table, not into locals.
 local fx_chain = {}
 
+-- Recipes retain track routing and envelopes, but never media items.
+function fx_chain.recipe_chunk(chunk)
+  local out, depth, skipping, roots = {}, 0, false, 0
+  for line in (chunk .. "\n"):gmatch("([^\r\n]*)\r?\n") do
+    local t = line:match("^%s*(.-)%s*$")
+    if t ~= "" then
+      if depth == 0 and not (t == "<TRACK" or t:match("^<TRACK[%s>]")) then error("RECIPE_CHUNK: expected TRACK") end
+      if depth == 0 then roots = roots + 1; if roots > 1 then error("RECIPE_CHUNK: multiple roots") end end
+      if depth == 1 and (t == "<ITEM" or t:match("^<ITEM[%s>]")) then skipping = true end
+      if not skipping then out[#out + 1] = line end
+      if t:sub(1,1) == "<" and t:sub(-1) ~= ">" then depth = depth + 1
+      elseif t == ">" then
+        depth = depth - 1
+        if skipping and depth == 1 then skipping = false end
+        if depth < 0 then error("RECIPE_CHUNK: unbalanced chunk") end
+      end
+    end
+  end
+  if depth ~= 0 or #out == 0 then error("RECIPE_CHUNK: incomplete chunk") end
+  return table.concat(out, "\n") .. "\n"
+end
+
+function fx_chain.capture_recipe_current(command)
+  if reaper.GetPlayState() ~= 0 then error("RECIPE_STOP_TRANSPORT: stop before capture") end
+  local tracks, total = {}, reaper.CountTracks(0)
+  if total > 256 then error("RECIPE_LIMIT: maximum 256 tracks") end
+  for i = 0, total do
+    local track = i == total and reaper.GetMasterTrack(0) or reaper.GetTrack(0, i)
+    for e = 0, reaper.CountTrackEnvelopes(track) - 1 do
+      if reaper.CountAutomationItems(reaper.GetTrackEnvelope(track,e)) > 0 then
+        error("RECIPE_AUTOMATION_ITEMS: pooled automation is not supported")
+      end
+    end
+    local success, chunk = reaper.GetTrackStateChunk(track, "", false)
+    if not success then error("RECIPE_CHUNK: cannot read track") end
+    local row = track_summary(track)
+    row.chunk = fx_chain.recipe_chunk(chunk)
+    row.fx_parameters = {}
+    for _,scope in ipairs({{0,reaper.TrackFX_GetCount(track)}, {0x1000000,reaper.TrackFX_GetRecCount(track)}}) do
+      for f=0,scope[2]-1 do
+        local index = scope[1]+f
+        local _,name = reaper.TrackFX_GetFXName(track,index,"")
+        local values = {}
+        for p=0,reaper.TrackFX_GetNumParams(track,index)-1 do
+          values[#values+1] = reaper.TrackFX_GetParamNormalized(track,index,p)
+        end
+        row.fx_parameters[#row.fx_parameters+1] = {name=name, scope=scope[1], enabled=reaper.TrackFX_GetEnabled(track,index),
+          offline=reaper.TrackFX_GetOffline(track,index), values=values}
+      end
+    end
+    row.is_master = i == total
+    row.envelopes = {}
+    for e = 0, reaper.CountTrackEnvelopes(track) - 1 do
+      local env = reaper.GetTrackEnvelope(track,e)
+      local _, name = reaper.GetEnvelopeName(env, "")
+      row.envelopes[#row.envelopes+1] = {name=name, points=reaper.CountEnvelopePoints(env)}
+    end
+    tracks[#tracks+1] = row
+  end
+  local tempo = {}
+  for i = 0, reaper.CountTempoTimeSigMarkers(0)-1 do
+    local _, time, measure, beat, bpm, num, denom, linear = reaper.GetTempoTimeSigMarker(0,i)
+    tempo[#tempo+1] = {time=time, measure=measure, beat=beat, bpm=bpm, num=num, denom=denom, linear=linear}
+  end
+  local num, denom, bpm = reaper.TimeMap_GetTimeSigAtTime(0,0)
+  return {format="reaper-mix-recipe-v1", source_project=get_project_name(), tracks=tracks,
+    sample_rate=reaper.GetSetProjectInfo(0,"PROJECT_SRATE",0,false),
+    sample_rate_use=reaper.GetSetProjectInfo(0,"PROJECT_SRATE_USE",0,false),
+    bpm=bpm, numerator=num, denominator=denom, tempo_markers=tempo,
+    limitations={"Media excluded", "External samples and IRs are referenced, not bundled", "Automation retains original song times"}}
+end
+
+function fx_chain.capture_recipe(command)
+  local p = command.payload or {}
+  local source = reaper.EnumProjects(-1, "")
+  local target = source
+  if p.project_index ~= nil then
+    if type(p.project_index) ~= "number" or p.project_index < 0 or p.project_index % 1 ~= 0 then error("BAD_PAYLOAD: project index") end
+    target = reaper.EnumProjects(p.project_index, "")
+    if not target then error("RECIPE_PROJECT_MISSING: no such tab") end
+    reaper.SelectProjectInstance(target)
+  end
+  local success, result = pcall(fx_chain.capture_recipe_current, command)
+  if target ~= source then reaper.SelectProjectInstance(source) end
+  if not success then error(result) end
+  return result
+end
+
+function fx_chain.rebuild_recipe(command)
+  local recipe = (command.payload or {}).recipe
+  if type(recipe) ~= "table" or recipe.format ~= "reaper-mix-recipe-v1"
+    or type(recipe.tracks) ~= "table" or #recipe.tracks < 1 or #recipe.tracks > 257 then
+    error("BAD_RECIPE: unsupported recipe")
+  end
+  local masters, bytes = 0, 0
+  for i,row in ipairs(recipe.tracks) do
+    if type(row.chunk) ~= "string" then error("BAD_RECIPE: missing chunk") end
+    if row.chunk:find("POOLEDENVINST",1,true) then error("BAD_RECIPE: automation items are not supported") end
+    bytes = bytes + #row.chunk
+    if bytes > 64000000 then error("BAD_RECIPE: exceeds 64 MB") end
+    if fx_chain.recipe_chunk(row.chunk) ~= row.chunk then error("BAD_RECIPE: media or noncanonical chunk") end
+    if row.is_master then masters = masters + 1; if i ~= #recipe.tracks then error("BAD_RECIPE: master must be last") end end
+  end
+  if masters ~= 1 then error("BAD_RECIPE: one master required") end
+  if type(recipe.bpm) ~= "number" or recipe.bpm <= 0 or recipe.bpm > 960 then error("BAD_RECIPE: tempo") end
+  local function number(n) return type(n)=="number" and n==n and math.abs(n)<1e12 end
+  if not number(recipe.bpm) or not number(recipe.numerator) or not number(recipe.denominator)
+    or recipe.numerator < 1 or recipe.denominator < 1 then error("BAD_RECIPE: time signature") end
+  if type(recipe.tempo_markers) ~= "table" then error("BAD_RECIPE: tempo markers") end
+  if recipe.sample_rate ~= nil and (not number(recipe.sample_rate) or recipe.sample_rate < 0) then error("BAD_RECIPE: sample rate") end
+  if recipe.sample_rate_use ~= nil and recipe.sample_rate_use ~= 0 and recipe.sample_rate_use ~= 1 then error("BAD_RECIPE: sample rate mode") end
+  for _,m in ipairs(recipe.tempo_markers) do
+    if type(m) ~= "table" or not number(m.time) or m.time < 0 or not number(m.bpm) or m.bpm <= 0
+      or not number(m.num) or not number(m.denom) or type(m.linear) ~= "boolean" then error("BAD_RECIPE: tempo marker") end
+  end
+  if reaper.GetPlayState() ~= 0 then error("RECIPE_STOP_TRANSPORT: stop before rebuild") end
+  if command.dry_run or (command.payload or {}).dry_run then return {tracks=#recipe.tracks-1, new_tab=true, dry_run=true} end
+  local source = reaper.EnumProjects(-1, "")
+  -- REAPER's built-in "New project tab (ignore default template)".
+  reaper.Main_OnCommand(41929, 0)
+  local target = reaper.EnumProjects(-1, "")
+  if target == source then error("RECIPE_NEW_TAB_FAILED: source left untouched") end
+  reaper.Undo_BeginBlock2(target)
+  local success, result = pcall(function()
+    if reaper.CountTracks(target) ~= 0 then error("RECIPE_NOT_EMPTY: new tab has tracks") end
+    for i=1,#recipe.tracks-1 do reaper.InsertTrackAtIndex(i-1,false) end
+    for i,row in ipairs(recipe.tracks) do
+      local track = row.is_master and reaper.GetMasterTrack(target) or reaper.GetTrack(target,i-1)
+      if not reaper.SetTrackStateChunk(track,row.chunk,false) then error("RECIPE_APPLY_FAILED: " .. tostring(row.name)) end
+    end
+    reaper.SetCurrentBPM(target,recipe.bpm,false)
+    if recipe.sample_rate ~= nil then reaper.GetSetProjectInfo(target,"PROJECT_SRATE",recipe.sample_rate,true) end
+    if recipe.sample_rate_use ~= nil then reaper.GetSetProjectInfo(target,"PROJECT_SRATE_USE",recipe.sample_rate_use,true) end
+    if #(recipe.tempo_markers or {}) == 0 then
+      reaper.SetTempoTimeSigMarker(target,-1,0,-1,-1,recipe.bpm,recipe.numerator,recipe.denominator,false)
+    end
+    for _,m in ipairs(recipe.tempo_markers or {}) do
+      if not reaper.SetTempoTimeSigMarker(target,-1,m.time,-1,-1,m.bpm,m.num,m.denom,m.linear) then error("RECIPE_TEMPO_FAILED") end
+    end
+    reaper.TrackList_AdjustWindows(false)
+    reaper.UpdateArrange()
+    return fx_chain.capture_recipe_current({payload={}})
+  end)
+  reaper.Undo_EndBlock2(target,"Rebuild mix recipe",-1)
+  reaper.SelectProjectInstance(source)
+  if not success then error("RECIPE_REBUILD_FAILED: original restored; partial new tab retained: " .. tostring(result)) end
+  return {rebuilt=result, source_restored=true, new_tab=true, media_items=0}
+end
+
 -- Which FX container a track chunk actually carries at depth 1: "FXCHAIN" or
 -- "MASTERFXLIST", or nil when the track has no FX block yet. The .rpp stores
 -- the master's FX as <MASTERFXLIST>, but GetTrackStateChunk on the master
@@ -4728,6 +4878,7 @@ local handlers = {}
 -- Commands that don't need an undo block: they read state, not project state.
 -- Everything else mutates the project and gets wrapped. Named for what it IS.
 local NO_UNDO_BLOCK = {
+  capture_mix_recipe = true, rebuild_mix_recipe = true,
   get_mix_snapshot = true, get_context = true, get_fx_parameters = true, scan_fx = true,
   get_fx_param_automation = true,
   discover_drum_map = true,
@@ -4833,6 +4984,7 @@ local function command_batch(command)
        or type(sub) ~= "table" or type(sub.type) ~= "string" then
       error("BAD_BATCH: every operation must be a command object")
     end
+    if sub.type == "rebuild_mix_recipe" then error("BAD_BATCH: rebuild must run alone") end
     if sub.type == "batch" then error("BAD_BATCH: nested batches are not supported") end
   end
   local results = {}
@@ -4867,6 +5019,8 @@ end
 -- top-level compat fields) and returns selected=false instead of erroring
 -- when nothing is selected.
 handlers.get_mix_snapshot = command_get_mix_snapshot
+handlers.capture_mix_recipe = fx_chain.capture_recipe
+handlers.rebuild_mix_recipe = fx_chain.rebuild_recipe
 handlers.get_context = command_get_context
 handlers.get_fx_parameters = command_get_fx_parameters
 handlers.scan_fx = command_scan_fx
@@ -5642,6 +5796,7 @@ if _G.REAPER_BRIDGE_SELFTEST then
     split_lines = split_lines,
     splice_fx_chain = fx_chain.splice,
     extract_fx_chain = fx_chain.extract,
+    recipe_chunk = fx_chain.recipe_chunk,
     fx_chain_container_in = fx_chain.container_in,
     parse_created_at = parse_created_at,
     requeue_decision = requeue_decision,
@@ -5728,4 +5883,3 @@ last_sweep = reaper.time_precise()
 
 log_line("bridge started")
 loop()
-

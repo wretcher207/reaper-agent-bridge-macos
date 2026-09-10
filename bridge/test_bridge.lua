@@ -1931,4 +1931,47 @@ end)()
 end)()
 
 rmrf(sandbox)
+do
+  local input = '<TRACK\nNAME Bass\n<ITEM\n<SOURCE WAVE\nFILE song.wav\n>\n>\n<FXCHAIN\n<VST plugin\nopaque\n>\n>\n>\n'
+  local stripped = B.recipe_chunk(input)
+  ok(not stripped:find('ITEM',1,true), 'recipe removes nested media')
+  ok(stripped:find('opaque',1,true), 'recipe retains plugin state')
+  eq(B.recipe_chunk(stripped),stripped,'recipe chunk is canonical')
+  eq(pcall(B.recipe_chunk,'<TRACK\n'),false,'recipe rejects incomplete chunk')
+  eq(pcall(B.recipe_chunk,'<TRACK\n>\n<TRACK\n>\n'),false,'recipe rejects multiple roots')
+  local r = {format='reaper-mix-recipe-v1',tracks={{chunk='<TRACK\n>\n',is_master=true}},bpm=148,numerator=4,denominator=4,tempo_markers={}}
+  local play = reaper.GetPlayState
+  reaper.GetPlayState=function() return 0 end
+  local preview=B.handlers.rebuild_mix_recipe({payload={recipe=r,dry_run=true}})
+  eq(preview.new_tab,true,'rebuild preview targets separate tab')
+  r.tempo_markers={{time='bad'}}
+  eq(pcall(B.handlers.rebuild_mix_recipe,{payload={recipe=r,dry_run=true}}),false,'bad tempo fails before new tab')
+  eq(pcall(B.handlers.batch,{payload={commands={{type='rebuild_mix_recipe',payload={}}}}}),false,'rebuild forbidden in batch')
+  reaper.GetPlayState=play
+end
+
+do
+  local saved = reaper
+  local state = {source={},target={},ended=false}
+  state.active=state.source
+  reaper = setmetatable({
+    GetPlayState=function() return 0 end,
+    EnumProjects=function() return state.active end,
+    Main_OnCommand=function(id) eq(id,41929,'rebuild ignores default template'); state.active=state.target end,
+    Undo_BeginBlock2=function(proj) eq(proj,state.target,'undo belongs to rebuilt tab') end,
+    Undo_EndBlock2=function(proj) eq(proj,state.target,'failed undo closes on target'); state.ended=true end,
+    CountTracks=function() return 0 end,
+    GetMasterTrack=function() return {} end,
+    SetTrackStateChunk=function() return false end,
+    SelectProjectInstance=function(proj) state.active=proj end,
+  },{__index=saved})
+  local r={format='reaper-mix-recipe-v1',tracks={{chunk='<TRACK\n>\n',is_master=true}},bpm=148,numerator=4,denominator=4,tempo_markers={}}
+  local success,err=pcall(B.handlers.rebuild_mix_recipe,{payload={recipe=r}})
+  eq(success,false,'failed state write is reported')
+  eq(state.active,state.source,'failed rebuild restores original tab')
+  eq(state.ended,true,'failed rebuild closes undo')
+  ok(tostring(err):find('partial new tab retained',1,true),'failure identifies partial tab')
+  reaper=saved
+end
+
 print(("test_bridge: OK (%d checks)"):format(checks))

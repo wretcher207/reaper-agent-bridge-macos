@@ -74,6 +74,7 @@ Claude Code session that always knows which track you have selected.
 | [Daemon Console](docs/CONSOLE.md) | the in-REAPER chat panel |
 | [Drums](docs/drums.md) | kit discovery, stem profiling, humanize |
 | [Guitar and bass](docs/guitar-bass.md) | `shred` and `band` |
+| [Mix recipes](docs/mix-recipes.md) | capture, compare and rebuild a mix setup |
 | [Verify](docs/verify.md) | closed-loop mix moves with measured proof |
 | [Protocol](docs/protocol.md) | the file wire format |
 | [Troubleshooting](docs/troubleshooting.md) | silent captures, stale heartbeats |

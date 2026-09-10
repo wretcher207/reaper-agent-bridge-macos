@@ -9,6 +9,7 @@ and Linux.
 | Command | What it does |
 | --- | --- |
 | `status` | liveness check. Run it first. |
+| `recipe capture\|diff\|rebuild <file> [--dry-run]` | save, compare or rebuild a [mix recipe](mix-recipes.md) |
 | `send <cmd.json> --wait` | send a command file and print the reply |
 | `cmd <type> '<payload-json>'` | send a command by type and payload |
 | `fxload "<plugin query>" <track\|master>` | load a plugin by fuzzy name |

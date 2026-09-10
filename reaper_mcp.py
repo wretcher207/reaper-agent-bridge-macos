@@ -1219,7 +1219,23 @@ POSITION_PROP = {
                     "{\"type\":\"time_selection\"}"),
 }
 
+def tool_mix_recipe(args):
+    from mix_recipes import run
+    try:
+        result = run(args["action"], args["path"],
+                     lambda kind, payload: reaperd.send_type(kind, payload, bridge_root=BRIDGE_ROOT,
+                                                            timeout_ms=120000, verbose=False),
+                     args.get("dry_run", False))
+        return _reply_result(result)
+    except (ValueError, OSError, KeyError) as exc:
+        return _text(str(exc), is_error=True)
+
+
 TOOLS = [
+    {"name": "mix_recipe", "description": "Capture a local mix recipe, compare it with the current session, or rebuild it in a separate project tab. Original tab is restored. Media is excluded.",
+     "inputSchema": _schema({"action": {"type": "string", "enum": ["capture", "diff", "rebuild"]}, "path": {"type": "string"}, "dry_run": {"type": "boolean"}}, ["action", "path"]),
+     "handler": tool_mix_recipe},
+
     {
         "name": "get_status",
         "description": ("Check the bridge is alive inside REAPER (heartbeat, open "

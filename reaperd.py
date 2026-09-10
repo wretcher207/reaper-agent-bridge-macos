@@ -1618,6 +1618,11 @@ def _skill_path(bridge_root):
     p = os.path.join(bridge_root, "skills", "drum-apparatus")
     if p not in sys.path:
         sys.path.insert(0, p)
+    s = sub.add_parser("recipe", help="capture, compare or rebuild a mix setup")
+    s.add_argument("action", choices=("capture", "diff", "rebuild"))
+    s.add_argument("path", help="local recipe JSON file")
+    s.add_argument("--dry-run", action="store_true", help="preview rebuild without creating a tab")
+    s.set_defaults(func=cmd_recipe)
     return p
 
 
@@ -2000,7 +2005,28 @@ def build_parser():
     s.add_argument("name", help="map name to remove")
     s.set_defaults(func=cmd_remove_map)
 
+    s = sub.add_parser("recipe", help="capture, compare or rebuild a mix setup")
+    s.add_argument("action", choices=("capture", "diff", "rebuild"))
+    s.add_argument("path", help="local recipe JSON file")
+    s.add_argument("--dry-run", action="store_true", help="preview rebuild without creating a tab")
+    s.set_defaults(func=cmd_recipe)
     return p
+
+
+def cmd_recipe(args):
+    from mix_recipes import run
+    try:
+        result = run(args.action, args.path,
+                     lambda kind, payload: send_type(kind, payload, bridge_root=args.bridge_root,
+                                                     timeout_ms=120000, verbose=False), args.dry_run)
+        print(json.dumps(result, indent=2))
+        if not result.get("ok"):
+            return 1
+        data = result.get("data", {})
+        return 2 if data.get("matches") is False or data.get("verified") is False else 0
+    except (ValueError, OSError) as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}))
+        return 1
 
 
 def main(argv=None):

@@ -58,6 +58,7 @@ jobs:
           python -m py_compile
           reaperd.py
           reaper_mcp.py
+          mix_recipes.py
           console_sidecar.py
           setup/install.py
           skills/drum-apparatus/groovegen.py
@@ -67,6 +68,7 @@ jobs:
           python -m compileall -q
           reaperd.py
           reaper_mcp.py
+          mix_recipes.py
           console_sidecar.py
           setup
           skills/drum-apparatus
